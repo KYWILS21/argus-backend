@@ -1,0 +1,16 @@
+# Virtual environment - don't commit this, it's huge and machine-specific
+venv/
+
+# Environment variables / secrets
+.env
+.env.local
+
+# SQLite database (your local conversation history - not needed in the repo)
+*.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code / editor junk
+.vscode/
