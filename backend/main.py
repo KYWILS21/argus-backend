@@ -21,6 +21,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
@@ -28,6 +29,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 from pydantic import BaseModel
 
 load_dotenv()
@@ -35,18 +38,47 @@ load_dotenv()
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ACCESS_TOKEN = os.environ["ACCESS_TOKEN"]  # shared secret your frontend sends
 DB_PATH = os.environ.get("ARGUS_DB_PATH", "argus.db")
-MODEL = "gemini-flash-latest"  # alias that always points at Google's current
-# recommended Flash model, so this won't break again when Google retires a
-# specific version (as happened with gemini-2.0-flash in mid-2026)
+MODEL = "gemini-3.6-flash"  # Google's explicitly recommended model as of
+# our testing (Sept 2026) for accounts that can't use gemini-2.5-flash
+# (that one's been closed off to new accounts) and don't want the
+# newest gemini-3.8-flash (via the "latest" alias), which had a very
+# tight ~20 requests/day free quota in our testing. If this one also
+# gets deprecated or rate-limited, check Google AI Studio's model list
+# for whatever's currently recommended and swap the string here --
+# that's the one line that needs to change.
+
+# Google Calendar credentials (from get_refresh_token.py setup) -- optional,
+# calendar features are simply unavailable if these aren't set.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
+CALENDAR_ENABLED = all(
+    [GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN]
+)
+print(f"[ARGUS] Calendar integration enabled: {CALENDAR_ENABLED}")
 
 SYSTEM_PROMPT = """You are ARGUS, a personal assistant to the user.
 Be direct, warm, and efficient. Keep responses conversational and concise
-unless the user asks for depth. You don't yet have tool access to the
-user's calendar, email, or other services -- that's coming in a later
-version -- so don't claim to have taken real-world actions."""
+unless the user asks for depth. You have access to the user's Google
+Calendar (which includes their Canvas assignments and due dates, synced
+in as a feed) via the get_upcoming_events tool -- use it whenever they
+ask about their schedule, what's due, or upcoming events, rather than
+guessing. You don't have other tool access yet (email, other services)
+-- don't claim to have taken actions you can't actually perform."""
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = FastAPI(title="ARGUS MVP")
+
+# Live Gemini Chat sessions, keyed by session_id. Google's SDK recommends
+# using its Chat object (rather than manually rebuilding history and
+# calling generate_content fresh each time) because it correctly tracks
+# internal state like thought_signatures across turns -- exactly the
+# thing we were fighting with a manual approach. Trade-off: this lives
+# in server memory, so it resets if the server restarts (a redeploy, a
+# crash, etc). Our SQLite log below still keeps a permanent human-
+# readable history either way, just not fed back into new Gemini calls
+# after a restart -- a fresh chat simply starts with no prior context.
+CHAT_SESSIONS: dict[str, "genai.chats.Chat"] = {}
 
 # Wide-open CORS is fine for a personal single-user project; tighten this
 # (to your actual frontend origin) if you ever expose this more broadly.
@@ -111,35 +143,115 @@ def check_auth(authorization: str | None):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def to_gemini_contents(history: list[dict]) -> list[types.Content]:
-    """Gemini uses 'model' instead of 'assistant' for the AI's turns."""
-    contents = []
-    for msg in history:
-        role = "model" if msg["role"] == "assistant" else "user"
-        contents.append(
-            types.Content(role=role, parts=[types.Part(text=msg["content"])])
+def get_calendar_service():
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+    return build("calendar", "v3", credentials=creds)
+
+
+def get_upcoming_events(days_ahead: int, max_results: int) -> str:
+    """Get the user's upcoming calendar events and assignment due dates
+    (including Canvas, synced in via feed) for the next N days.
+
+    Args:
+        days_ahead: How many days ahead to look. Use 7 unless the user
+            specifies otherwise.
+        max_results: Maximum number of events to return. Use 15 unless
+            the user asks for more or fewer.
+    """
+    if not CALENDAR_ENABLED:
+        return "Calendar access isn't configured yet."
+
+    service = get_calendar_service()
+    now = datetime.now(timezone.utc)
+    time_max = now + timedelta(days=days_ahead)
+
+    # List all calendars the user has, so Canvas feed entries are included
+    # alongside their primary calendar, not just the default one.
+    calendar_list = service.calendarList().list().execute()
+    all_events = []
+    for cal in calendar_list.get("items", []):
+        events_result = (
+            service.events()
+            .list(
+                calendarId=cal["id"],
+                timeMin=now.isoformat(),
+                timeMax=time_max.isoformat(),
+                maxResults=max_results,
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
         )
-    return contents
+        for event in events_result.get("items", []):
+            start = event["start"].get("dateTime", event["start"].get("date"))
+            all_events.append(
+                f"- {event.get('summary', 'Untitled')} ({start}) "
+                f"[{cal.get('summary', 'calendar')}]"
+            )
+
+    if not all_events:
+        return f"No events found in the next {days_ahead} days."
+
+    all_events.sort()
+    return "\n".join(all_events[:max_results])
 
 
-def generate_with_retry(contents: list[types.Content], max_attempts: int = 4):
+def get_or_create_chat(session_id: str):
+    """Returns the live Gemini Chat session for this conversation,
+    creating one if it doesn't exist yet. Using the SDK's Chat object
+    (rather than manually rebuilding history each request) is Google's
+    recommended pattern for automatic function calling -- it correctly
+    threads internal state (like thought_signatures) between turns,
+    which a hand-rolled history list doesn't preserve properly."""
+    if session_id in CHAT_SESSIONS:
+        return CHAT_SESSIONS[session_id]
+
+    config_kwargs = {"system_instruction": SYSTEM_PROMPT}
+    if CALENDAR_ENABLED:
+        # Passing the Python function directly (not a manual schema)
+        # enables "automatic function calling": the SDK builds the tool
+        # schema from the docstring/type hints and executes the function
+        # itself when Gemini asks for it. Using client.chats.create()
+        # (below) rather than a one-off generate_content call lets the
+        # SDK correctly track thought_signature state between turns on
+        # its own -- no manual thinking-mode workarounds needed.
+        config_kwargs["tools"] = [get_upcoming_events]
+
+    chat = client.chats.create(
+        model=MODEL,
+        config=types.GenerateContentConfig(**config_kwargs),
+    )
+    CHAT_SESSIONS[session_id] = chat
+    return chat
+
+
+def send_with_retry(chat, message: str, max_attempts: int = 4):
     """Gemini's free tier occasionally returns 503 UNAVAILABLE when the
-    model is under heavy demand. This is transient -- retrying after a
-    short wait almost always succeeds. We back off 1s, 2s, 4s, 8s."""
+    model is under heavy demand, and can return 429 RESOURCE_EXHAUSTED if
+    you hit its per-minute rate limit. Both are transient -- retrying
+    after a short wait almost always succeeds."""
     last_error = None
     for attempt in range(max_attempts):
         try:
-            return client.models.generate_content(
-                model=MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT
-                ),
-            )
+            return chat.send_message(message)
         except genai_errors.ServerError as e:
             last_error = e
             if attempt < max_attempts - 1:
                 time.sleep(2**attempt)
+        except genai_errors.ClientError as e:
+            is_rate_limit = getattr(e, "status_code", None) == 429
+            if not is_rate_limit:
+                raise
+            last_error = e
+            if attempt < max_attempts - 1:
+                # Rate limits need longer waits than server overload does.
+                time.sleep(5 * (attempt + 1))
     raise last_error
 
 
@@ -148,14 +260,15 @@ def chat(req: ChatRequest, authorization: str | None = Header(default=None)):
     check_auth(authorization)
 
     session_id = req.session_id or str(uuid.uuid4())
-    history = load_history(session_id)
-    history.append({"role": "user", "content": req.message})
+    gemini_chat = get_or_create_chat(session_id)
 
     try:
-        response = generate_with_retry(to_gemini_contents(history))
-    except genai_errors.ServerError:
-        # Gemini is overloaded even after retries -- fail gracefully
-        # instead of a raw 500, so the frontend can show something useful.
+        response = send_with_retry(gemini_chat, req.message)
+    except (genai_errors.ServerError, genai_errors.ClientError) as e:
+        # Gemini is overloaded or rate-limited even after retries -- fail
+        # gracefully instead of a raw 500, so the frontend shows
+        # something useful. Log the real cause so we can see it locally.
+        print(f"[ARGUS] Gemini call failed after retries: {e}")
         raise HTTPException(
             status_code=503,
             detail="Gemini is under heavy load right now. Give it a "
