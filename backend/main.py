@@ -289,11 +289,10 @@ def chat(req: ChatRequest, authorization: str | None = Header(default=None)):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
-
-@app.get("/health")
-def health():
     return {
         "status": "ok",
-        "calendar_enabled": CALENDAR_ENABLED
+        "calendar_enabled": CALENDAR_ENABLED,
+        "has_client_id": bool(GOOGLE_CLIENT_ID),
+        "has_client_secret": bool(GOOGLE_CLIENT_SECRET),
+        "has_refresh_token": bool(GOOGLE_REFRESH_TOKEN),
     }

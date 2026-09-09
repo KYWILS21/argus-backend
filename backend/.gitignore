@@ -14,3 +14,5 @@ __pycache__/
 
 # VS Code / editor junk
 .vscode/
+client_secret.json
+backend/client_secret.json
