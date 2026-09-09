@@ -38,7 +38,7 @@ load_dotenv()
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ACCESS_TOKEN = os.environ["ACCESS_TOKEN"]  # shared secret your frontend sends
 DB_PATH = os.environ.get("ARGUS_DB_PATH", "argus.db")
-MODEL = "gemini-3.6-flash"  # Google's explicitly recommended model as of
+MODEL = "gemini-2.5-flash"  # Google's explicitly recommended model as of
 # our testing (Sept 2026) for accounts that can't use gemini-2.5-flash
 # (that one's been closed off to new accounts) and don't want the
 # newest gemini-3.8-flash (via the "latest" alias), which had a very
@@ -170,6 +170,10 @@ def get_upcoming_events(days_ahead: int, max_results: int) -> str:
     service = get_calendar_service()
     now = datetime.now(timezone.utc)
     time_max = now + timedelta(days=days_ahead)
+    config_kwargs = {"system_instruction": SYSTEM_PROMPT}
+
+    if CALENDAR_ENABLED:
+      config_kwargs["tools"] = [get_upcoming_events]
 
     # List all calendars the user has, so Canvas feed entries are included
     # alongside their primary calendar, not just the default one.
@@ -286,3 +290,10 @@ def chat(req: ChatRequest, authorization: str | None = Header(default=None)):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "calendar_enabled": CALENDAR_ENABLED
+    }
