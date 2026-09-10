@@ -29,7 +29,7 @@ load_dotenv()
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ACCESS_TOKEN = os.environ["ACCESS_TOKEN"]
 DB_PATH = os.environ.get("ARGUS_DB_PATH", "argus.db")
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 
 # Google Calendar credentials
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
