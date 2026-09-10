@@ -3,6 +3,7 @@ ARGUS MVP backend.
 
 A minimal, always-on personal assistant backend:
 - Talks to Google's Gemini via the free-tier API
+- Full Google Calendar Read/Write management via function calling
 - Remembers conversation history per session in SQLite
 - Protected by a single shared access token
 """
@@ -44,16 +45,20 @@ SYSTEM_PROMPT = f"""You are ARGUS, a personal assistant to the user.
 Be direct, warm, and efficient. Keep responses conversational and concise
 unless the user asks for depth.
 
-You have access to the user's Google Calendar via two tools:
+You have full read and write access to the user's Google Calendar via four tools:
 1. get_upcoming_events: Use this whenever the user asks what is on their schedule,
-   what's due, or about upcoming events.
+   what's due, or when you need to inspect event details/IDs to update or delete one.
 2. create_calendar_event: Use this whenever the user asks you to schedule,
-   create, or add an event or reminder to their calendar.
+   create, or add an event.
+3. update_calendar_event: Use this to change an event's title, time, or description.
+   If you don't know the event ID, use get_upcoming_events first to find it.
+4. delete_calendar_event: Use this to cancel or delete an event. If you don't know
+   the event ID, use get_upcoming_events first or pass the event title.
 
 Reference information for time calculations:
 Current UTC time: {datetime.now(timezone.utc).isoformat()}
 
-Always confirm the title, date, and start/end time of the event once scheduled.
+Always confirm the details of any created, modified, or deleted events.
 You don't have other tool access yet (email, notes, etc.) -- don't claim
 to take actions you can't actually perform."""
 
@@ -170,8 +175,9 @@ def get_upcoming_events(days_ahead: int = 7, max_results: int = 15) -> str:
             )
             for event in events_result.get("items", []):
                 start = event["start"].get("dateTime", event["start"].get("date"))
+                event_id = event.get("id", "")
                 all_events.append(
-                    f"- {event.get('summary', 'Untitled')} ({start}) "
+                    f"- {event.get('summary', 'Untitled')} ({start}) [id: {event_id}] "
                     f"[{cal.get('summary', 'calendar')}]"
                 )
 
@@ -231,13 +237,109 @@ def create_calendar_event(
         return f"Failed to create event: {e}"
 
 
+def update_calendar_event(
+    event_id: str,
+    summary: str | None = None,
+    new_start_iso: str | None = None,
+    new_end_iso: str | None = None,
+    description: str | None = None,
+) -> str:
+    """Update an existing event on the user's primary Google Calendar.
+
+    Args:
+        event_id: The unique Google Calendar event ID (obtained from get_upcoming_events).
+        summary: Optional new title for the event.
+        new_start_iso: Optional new start time formatted in ISO 8601 string.
+        new_end_iso: Optional new end time formatted in ISO 8601 string.
+        description: Optional updated description/notes.
+    """
+    if not CALENDAR_ENABLED:
+        return "Calendar access isn't configured yet."
+
+    try:
+        service = get_calendar_service()
+        event = service.events().get(calendarId="primary", eventId=event_id).execute()
+
+        if summary:
+            event["summary"] = summary
+        if description is not None:
+            event["description"] = description
+        if new_start_iso:
+            event["start"] = {"dateTime": new_start_iso}
+            if not new_end_iso:
+                start_dt = datetime.fromisoformat(new_start_iso.replace("Z", "+00:00"))
+                new_end_iso = (start_dt + timedelta(hours=1)).isoformat()
+            event["end"] = {"dateTime": new_end_iso}
+        elif new_end_iso:
+            event["end"] = {"dateTime": new_end_iso}
+
+        updated = (
+            service.events()
+            .update(calendarId="primary", eventId=event_id, body=event)
+            .execute()
+        )
+        return f"Successfully updated event '{updated.get('summary')}'."
+    except Exception as e:
+        print(f"[ARGUS] update_calendar_event failed: {e}")
+        return f"Failed to update event: {e}"
+
+
+def delete_calendar_event(
+    event_id: str | None = None,
+    event_title: str | None = None,
+) -> str:
+    """Delete an event from the user's primary Google Calendar by event_id or event_title.
+
+    Args:
+        event_id: The unique Google Calendar event ID if known.
+        event_title: If event_id is not known, provide the title/summary of the event to delete.
+    """
+    if not CALENDAR_ENABLED:
+        return "Calendar access isn't configured yet."
+
+    try:
+        service = get_calendar_service()
+
+        if not event_id and event_title:
+            now = datetime.now(timezone.utc).isoformat()
+            search_res = (
+                service.events()
+                .list(
+                    calendarId="primary",
+                    q=event_title,
+                    timeMin=now,
+                    maxResults=5,
+                    singleEvents=True,
+                )
+                .execute()
+            )
+            items = search_res.get("items", [])
+            if not items:
+                return f"Could not find an upcoming event matching '{event_title}' to delete."
+            event_id = items[0]["id"]
+
+        if not event_id:
+            return "Please provide either an event_id or event_title to delete."
+
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        return f"Successfully deleted event (ID: {event_id})."
+    except Exception as e:
+        print(f"[ARGUS] delete_calendar_event failed: {e}")
+        return f"Failed to delete event: {e}"
+
+
 def get_or_create_chat(session_id: str):
     if session_id in CHAT_SESSIONS:
         return CHAT_SESSIONS[session_id]
 
     config_kwargs = {"system_instruction": SYSTEM_PROMPT}
     if CALENDAR_ENABLED:
-        config_kwargs["tools"] = [get_upcoming_events, create_calendar_event]
+        config_kwargs["tools"] = [
+            get_upcoming_events,
+            create_calendar_event,
+            update_calendar_event,
+            delete_calendar_event,
+        ]
 
     chat = client.chats.create(
         model=MODEL,
