@@ -1,19 +1,11 @@
-SYSTEM_PROMPT = f"""You are ARGUS, a personal assistant to the user.
-Be direct, warm, and efficient. Keep responses conversational and concise
-unless the user asks for depth.
+"""
+ARGUS MVP backend.
 
-You have access to the user's Google Calendar via two tools:
-1. get_upcoming_events: Use this whenever the user asks what is on their schedule,
-   what's due, or about upcoming events.
-2. create_calendar_event: Use this whenever the user asks you to schedule,
-   create, or add an event or reminder to their calendar.
-
-Reference information for time calculations:
-Current UTC time: {datetime.now(timezone.utc).isoformat()}
-
-Always confirm the title, date, and start/end time of the event once scheduled.
-You don't have other tool access yet (email, notes, etc.) -- don't claim
-to take actions you can't actually perform."""
+A minimal, always-on personal assistant backend:
+- Talks to Google's Gemini via the free-tier API
+- Remembers conversation history per session in SQLite
+- Protected by a single shared access token
+"""
 
 import os
 import sqlite3
@@ -48,14 +40,22 @@ CALENDAR_ENABLED = all(
 )
 print(f"[ARGUS] Calendar integration enabled: {CALENDAR_ENABLED}")
 
-SYSTEM_PROMPT = """You are ARGUS, a personal assistant to the user.
+SYSTEM_PROMPT = f"""You are ARGUS, a personal assistant to the user.
 Be direct, warm, and efficient. Keep responses conversational and concise
-unless the user asks for depth. You have access to the user's Google
-Calendar (which includes their Canvas assignments and due dates, synced
-in as a feed) via the get_upcoming_events tool -- use it whenever they
-ask about their schedule, what's due, or upcoming events, rather than
-guessing. You don't have other tool access yet (email, other services)
--- don't claim to have taken actions you can't actually perform."""
+unless the user asks for depth.
+
+You have access to the user's Google Calendar via two tools:
+1. get_upcoming_events: Use this whenever the user asks what is on their schedule,
+   what's due, or about upcoming events.
+2. create_calendar_event: Use this whenever the user asks you to schedule,
+   create, or add an event or reminder to their calendar.
+
+Reference information for time calculations:
+Current UTC time: {datetime.now(timezone.utc).isoformat()}
+
+Always confirm the title, date, and start/end time of the event once scheduled.
+You don't have other tool access yet (email, notes, etc.) -- don't claim
+to take actions you can't actually perform."""
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = FastAPI(title="ARGUS MVP")
@@ -65,6 +65,7 @@ CHAT_SESSIONS: dict[str, "genai.chats.Chat"] = {}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -147,37 +148,87 @@ def get_upcoming_events(days_ahead: int = 7, max_results: int = 15) -> str:
     if not CALENDAR_ENABLED:
         return "Calendar access isn't configured yet."
 
-    service = get_calendar_service()
-    now = datetime.now(timezone.utc)
-    time_max = now + timedelta(days=days_ahead)
+    try:
+        service = get_calendar_service()
+        now = datetime.now(timezone.utc)
+        time_max = now + timedelta(days=days_ahead)
 
-    calendar_list = service.calendarList().list().execute()
-    all_events = []
-    for cal in calendar_list.get("items", []):
-        events_result = (
-            service.events()
-            .list(
-                calendarId=cal["id"],
-                timeMin=now.isoformat(),
-                timeMax=time_max.isoformat(),
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
+        calendar_list = service.calendarList().list().execute()
+        all_events = []
+        for cal in calendar_list.get("items", []):
+            events_result = (
+                service.events()
+                .list(
+                    calendarId=cal["id"],
+                    timeMin=now.isoformat(),
+                    timeMax=time_max.isoformat(),
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute()
             )
+            for event in events_result.get("items", []):
+                start = event["start"].get("dateTime", event["start"].get("date"))
+                all_events.append(
+                    f"- {event.get('summary', 'Untitled')} ({start}) "
+                    f"[{cal.get('summary', 'calendar')}]"
+                )
+
+        if not all_events:
+            return f"No events found in the next {days_ahead} days."
+
+        all_events.sort()
+        return "\n".join(all_events[:max_results])
+
+    except Exception as e:
+        print(f"[ARGUS] Calendar tool execution failed: {e}")
+        return f"Unable to retrieve calendar events right now: {e}"
+
+
+def create_calendar_event(
+    summary: str,
+    start_iso: str,
+    end_iso: str | None = None,
+    description: str = "",
+) -> str:
+    """Create a new event on the user's primary Google Calendar.
+
+    Args:
+        summary: The title or name of the event (e.g. 'CS Algorithm Study Session').
+        start_iso: The start time formatted in ISO 8601 string (e.g. '2026-09-11T15:00:00Z' or '2026-09-11T15:00:00-04:00').
+        end_iso: The end time formatted in ISO 8601 string. If not provided, defaults to 1 hour after start_iso.
+        description: Optional notes, details, or meeting link description.
+    """
+    if not CALENDAR_ENABLED:
+        return "Calendar access isn't configured yet."
+
+    try:
+        service = get_calendar_service()
+
+        if not end_iso:
+            start_dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+            end_iso = (start_dt + timedelta(hours=1)).isoformat()
+
+        event_body = {
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_iso},
+            "end": {"dateTime": end_iso},
+        }
+
+        created_event = (
+            service.events()
+            .insert(calendarId="primary", body=event_body)
             .execute()
         )
-        for event in events_result.get("items", []):
-            start = event["start"].get("dateTime", event["start"].get("date"))
-            all_events.append(
-                f"- {event.get('summary', 'Untitled')} ({start}) "
-                f"[{cal.get('summary', 'calendar')}]"
-            )
-
-    if not all_events:
-        return f"No events found in the next {days_ahead} days."
-
-    all_events.sort()
-    return "\n".join(all_events[:max_results])
+        return (
+            f"Successfully created event '{summary}' starting at {start_iso}. "
+            f"Event Link: {created_event.get('htmlLink', 'N/A')}"
+        )
+    except Exception as e:
+        print(f"[ARGUS] create_calendar_event failed: {e}")
+        return f"Failed to create event: {e}"
 
 
 def get_or_create_chat(session_id: str):
@@ -186,7 +237,7 @@ def get_or_create_chat(session_id: str):
 
     config_kwargs = {"system_instruction": SYSTEM_PROMPT}
     if CALENDAR_ENABLED:
-        config_kwargs["tools"] = [get_upcoming_events]
+        config_kwargs["tools"] = [get_upcoming_events, create_calendar_event]
 
     chat = client.chats.create(
         model=MODEL,
