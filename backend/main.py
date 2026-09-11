@@ -341,13 +341,25 @@ def get_or_create_chat(session_id: str):
             delete_calendar_event,
         ]
 
+    # Rebuild history from SQLite for cold starts / container restarts
+    db_history = load_history(session_id, limit=20)
+    formatted_history = []
+    for entry in db_history:
+        role = "user" if entry["role"] == "user" else "model"
+        formatted_history.append(
+            types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=entry["content"])],
+            )
+        )
+
     chat = client.chats.create(
         model=MODEL,
         config=types.GenerateContentConfig(**config_kwargs),
+        history=formatted_history if formatted_history else None,
     )
     CHAT_SESSIONS[session_id] = chat
     return chat
-
 
 def send_with_retry(chat, message: str, max_attempts: int = 4):
     last_error = None
@@ -402,3 +414,8 @@ def health():
         "has_client_secret": bool(GOOGLE_CLIENT_SECRET),
         "has_refresh_token": bool(GOOGLE_REFRESH_TOKEN),
     }
+
+@app.get("/history/{session_id}")
+def get_history(session_id: str, authorization: str | None = Header(default=None)):
+    check_auth(authorization)
+    return {"messages": load_history(session_id, limit=50)}
