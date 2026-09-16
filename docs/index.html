@@ -137,6 +137,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
     #micBtn:hover {
@@ -221,34 +223,105 @@
       return div;
     }
 
-    // --- 1. Text-to-Speech (TTS) ---
+    // --- Audio Unlocking & TTS ---
+    let ttsPrimed = false;
+    function primeTTS() {
+      if (!("speechSynthesis" in window) || ttsPrimed) return;
+      const silent = new SpeechSynthesisUtterance("");
+      window.speechSynthesis.speak(silent);
+      ttsPrimed = true;
+    }
+
     function speak(text) {
       if (!("speechSynthesis" in window)) return;
       window.speechSynthesis.cancel();
 
-      // Strip markdown syntax for natural voice output
       const cleanText = text.replace(/[*#`_]/g, "").trim();
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.rate = 1.0;
       utterance.pitch = 1.0;
 
       const voices = window.speechSynthesis.getVoices();
-      const preferredVoice = voices.find(v => v.lang.startsWith("en") && !v.name.includes("Google"));
+      const preferredVoice = voices.find(v => v.lang.startsWith("en"));
       if (preferredVoice) utterance.voice = preferredVoice;
 
       window.speechSynthesis.speak(utterance);
     }
 
-    // --- 2. Speech-to-Text (STT) ---
+    // --- Universal Speech-to-Text Controller ---
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
     let isListening = false;
+    let mediaRecorder = null;
+    let audioChunks = [];
 
+    // Fallback: Direct Audio Recording via getUserMedia (Supported Everywhere)
+    async function startFallbackRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach(track => track.stop());
+          if (audioChunks.length === 0) return;
+
+          const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+          const pending = addMessage("assistant", "Transcribing audio...");
+          pending.classList.add("pending");
+
+          try {
+            const formData = new FormData();
+            formData.append("file", audioBlob, "speech.webm");
+
+            const res = await fetch(`${config.backendUrl}/transcribe`, {
+              method: "POST",
+              headers: { "Authorization": "Bearer " + config.token },
+              body: formData
+            });
+
+            if (!res.ok) throw new Error("Transcription request failed");
+            const data = await res.json();
+            pending.remove();
+
+            if (data.text) {
+              input.value = data.text;
+              submitChatMessage(data.text);
+            }
+          } catch (err) {
+            pending.textContent = "Voice transcription failed: " + err.message;
+            pending.classList.remove("pending");
+          }
+        };
+
+        mediaRecorder.start();
+        isListening = true;
+        micBtn.classList.add("listening");
+      } catch (err) {
+        console.error("Microphone access denied:", err);
+        alert("Please allow microphone access to use voice commands.");
+      }
+    }
+
+    function stopFallbackRecording() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      isListening = false;
+      micBtn.classList.remove("listening");
+    }
+
+    // Initialize Web Speech API if natively functional
     if (SpeechRecognition) {
       recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = false;
       recognition.lang = "en-US";
+      recognition.maxAlternatives = 1;
 
       recognition.onstart = () => {
         isListening = true;
@@ -256,13 +329,15 @@
       };
 
       recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        input.value = transcript;
-        form.dispatchEvent(new Event("submit"));
+        if (event.results && event.results[0] && event.results[0][0]) {
+          const transcript = event.results[0][0].transcript;
+          input.value = transcript;
+          submitChatMessage(transcript);
+        }
       };
 
       recognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
+        console.warn("Native recognition error, using audio fallback:", event.error);
         micBtn.classList.remove("listening");
         isListening = false;
       };
@@ -271,56 +346,36 @@
         micBtn.classList.remove("listening");
         isListening = false;
       };
-
-      micBtn.addEventListener("click", () => {
-        if (isListening) {
-          recognition.stop();
-        } else {
-          recognition.start();
-        }
-      });
-    } else {
-      micBtn.style.display = "none";
     }
 
-    // --- 3. Chat History Loading ---
-    async function loadChatHistory() {
-      if (!config || !config.backendUrl || !config.token || !sessionId) return;
+    // Unified Mic Button Action
+    micBtn.addEventListener("click", () => {
+      primeTTS();
 
-      try {
-        const res = await fetch(`${config.backendUrl}/history/${sessionId}`, {
-          headers: {
-            "Authorization": "Bearer " + config.token
-          }
-        });
-
-        if (!res.ok) return;
-
-        const data = await res.json();
-        if (data.messages && data.messages.length > 0) {
-          messagesEl.innerHTML = "";
-          data.messages.forEach(msg => {
-            const role = msg.role === "user" ? "user" : "assistant";
-            addMessage(role, msg.content);
-          });
-          messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (isListening) {
+        if (recognition) {
+          try { recognition.stop(); } catch (_) {}
         }
-      } catch (err) {
-        console.error("Failed to restore history:", err);
+        if (mediaRecorder) {
+          stopFallbackRecording();
+        }
+        return;
       }
-    }
 
-    if (config && config.backendUrl && config.token) {
-      showApp();
-      loadChatHistory();
-    } else {
-      showSetup();
-    }
+      // Try browser recognition; fallback immediately to media recorder if it fails to start
+      if (recognition) {
+        try {
+          recognition.start();
+        } catch (e) {
+          startFallbackRecording();
+        }
+      } else {
+        startFallbackRecording();
+      }
+    });
 
-    // --- 4. Submit Handler ---
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
+    // --- Message Dispatcher ---
+    async function submitChatMessage(text) {
       if (!text) return;
       input.value = "";
       addMessage("user", text);
@@ -351,7 +406,45 @@
         sendBtn.disabled = false;
         input.focus();
       }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      primeTTS();
+      submitChatMessage(input.value.trim());
     });
+
+    // --- History Loading ---
+    async function loadChatHistory() {
+      if (!config || !config.backendUrl || !config.token || !sessionId) return;
+
+      try {
+        const res = await fetch(`${config.backendUrl}/history/${sessionId}`, {
+          headers: { "Authorization": "Bearer " + config.token }
+        });
+
+        if (!res.ok) return;
+
+        const data = await res.json();
+        if (data.messages && data.messages.length > 0) {
+          messagesEl.innerHTML = "";
+          data.messages.forEach(msg => {
+            const role = msg.role === "user" ? "user" : "assistant";
+            addMessage(role, msg.content);
+          });
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      } catch (err) {
+        console.error("Failed to restore history:", err);
+      }
+    }
+
+    if (config && config.backendUrl && config.token) {
+      showApp();
+      loadChatHistory();
+    } else {
+      showSetup();
+    }
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("sw.js").catch(() => {});
