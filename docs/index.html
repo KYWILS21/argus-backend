@@ -6,6 +6,7 @@
 <title>ARGUS</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0b0f14" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <style>
@@ -140,13 +141,8 @@
     config = { backendUrl, token };
     localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
     showApp();
+    loadChatHistory();
   });
-
-  if (config && config.backendUrl && config.token) {
-    showApp();
-  } else {
-    showSetup();
-  }
 
   const messagesEl = document.getElementById("messages");
   const form = document.getElementById("chatForm");
@@ -160,6 +156,39 @@
     messagesEl.appendChild(div);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return div;
+  }
+
+  async function loadChatHistory() {
+    if (!config || !config.backendUrl || !config.token || !sessionId) return;
+
+    try {
+      const res = await fetch(`${config.backendUrl}/history/${sessionId}`, {
+        headers: {
+          "Authorization": "Bearer " + config.token
+        }
+      });
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      if (data.messages && data.messages.length > 0) {
+        messagesEl.innerHTML = "";
+        data.messages.forEach(msg => {
+          const role = msg.role === "user" ? "user" : "assistant";
+          addMessage(role, msg.content);
+        });
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    } catch (err) {
+      console.error("Failed to restore history:", err);
+    }
+  }
+
+  if (config && config.backendUrl && config.token) {
+    showApp();
+    loadChatHistory();
+  } else {
+    showSetup();
   }
 
   form.addEventListener("submit", async (e) => {
