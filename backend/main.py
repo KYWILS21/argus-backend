@@ -16,8 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Header, Depends, UploadFile, Filefrom fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -419,3 +418,21 @@ def health():
 def get_history(session_id: str, authorization: str | None = Header(default=None)):
     check_auth(authorization)
     return {"messages": load_history(session_id, limit=50)}
+
+@app.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...), token: str = Depends(verify_token)):
+    try:
+        audio_bytes = await file.read()
+        mime_type = file.content_type or "audio/mp4"
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                "Transcribe this speech verbatim. Output strictly the plain text transcription, with no explanations, extra formatting, or conversational replies."
+            ]
+        )
+        transcription = response.text.strip() if response.text else ""
+        return {"text": transcription}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")

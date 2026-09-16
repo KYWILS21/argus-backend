@@ -139,8 +139,7 @@
       justify-content: center;
       user-select: none;
       -webkit-user-select: none;
-      -webkit-touch-callout: none;
-      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
     }
 
     #micBtn:hover {
@@ -177,7 +176,7 @@
     <div id="messages"></div>
     <form id="chatForm">
       <input type="text" id="input" placeholder="Type or speak to ARGUS..." autocomplete="off" />
-      <button type="button" id="micBtn" title="Speak to ARGUS">🎙️</button>
+      <button type="button" id="micBtn" title="Record Voice">🎙️</button>
       <button type="submit" id="sendBtn">Send</button>
     </form>
   </div>
@@ -225,7 +224,7 @@
       return div;
     }
 
-    // --- Audio Feedback (TTS) ---
+    // --- Audio Playback (TTS) ---
     function speak(text) {
       if (!("speechSynthesis" in window)) return;
       window.speechSynthesis.cancel();
@@ -242,67 +241,92 @@
       window.speechSynthesis.speak(utterance);
     }
 
-    // --- Speech Recognition (STT for Mobile Safari) ---
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    let recognition = null;
-    let isListening = false;
+    // --- Audio Recording via MediaRecorder (Universal Support) ---
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isRecording = false;
 
-    if (SpeechRecognition) {
-      recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = "en-US";
+    async function toggleRecording() {
+      if (isRecording) {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+        isRecording = false;
+        micBtn.classList.remove("listening");
+        return;
+      }
 
-      recognition.onstart = () => {
-        isListening = true;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioChunks = [];
+
+        // Check platform support: Safari on iOS requires audio/mp4; Chrome prefers audio/webm
+        let mimeType = "audio/webm";
+        if (window.MediaRecorder.isTypeSupported("audio/mp4")) {
+          mimeType = "audio/mp4";
+        } else if (window.MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+          mimeType = "audio/webm;codecs=opus";
+        }
+
+        mediaRecorder = new MediaRecorder(stream, { mimeType });
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            audioChunks.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach(track => track.stop());
+
+          if (audioChunks.length === 0) return;
+          const audioBlob = new Blob(audioChunks, { type: mimeType });
+
+          const pending = addMessage("assistant", "Transcribing audio...");
+          pending.classList.add("pending");
+
+          try {
+            const formData = new FormData();
+            const extension = mimeType.includes("mp4") ? "mp4" : "webm";
+            formData.append("file", audioBlob, `input.${extension}`);
+
+            const res = await fetch(`${config.backendUrl}/transcribe`, {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + config.token
+              },
+              body: formData
+            });
+
+            if (!res.ok) throw new Error("Transcription server error: " + res.status);
+            const data = await res.json();
+            pending.remove();
+
+            if (data.text && data.text.trim()) {
+              submitChatMessage(data.text.trim());
+            } else {
+              addMessage("assistant", "Could not detect clear speech. Please try again.");
+            }
+          } catch (err) {
+            pending.textContent = "Transcription error: " + err.message;
+            pending.classList.remove("pending");
+          }
+        };
+
+        mediaRecorder.start();
+        isRecording = true;
         micBtn.classList.add("listening");
-      };
-
-      recognition.onresult = (event) => {
-        isListening = false;
+      } catch (err) {
+        alert("Microphone permission was denied or unavailable: " + err.message);
+        isRecording = false;
         micBtn.classList.remove("listening");
-
-        if (event.results && event.results[0] && event.results[0][0]) {
-          const transcript = event.results[0][0].transcript;
-          input.value = transcript;
-          submitChatMessage(transcript);
-        }
-      };
-
-      recognition.onerror = (event) => {
-        isListening = false;
-        micBtn.classList.remove("listening");
-        alert("Safari Speech Error: " + event.error);
-      };
-
-      recognition.onend = () => {
-        isListening = false;
-        micBtn.classList.remove("listening");
-      };
-
-      // Pointerdown directly handles touch/tap without synthetic delay
-      const handleMicPress = (e) => {
-        e.preventDefault();
-
-        if (isListening) {
-          try { recognition.stop(); } catch (_) {}
-          return;
-        }
-
-        try {
-          recognition.start();
-        } catch (err) {
-          alert("Could not start recognition: " + err.message);
-        }
-      };
-
-      micBtn.addEventListener("pointerdown", handleMicPress);
-    } else {
-      micBtn.addEventListener("pointerdown", (e) => {
-        e.preventDefault();
-        alert("Speech recognition is not supported on this browser engine.");
-      });
+      }
     }
+
+    micBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      toggleRecording();
+    });
 
     // --- Message Dispatcher ---
     async function submitChatMessage(text) {
@@ -343,7 +367,7 @@
       submitChatMessage(input.value.trim());
     });
 
-    // --- History Loading ---
+    // --- Load History ---
     async function loadChatHistory() {
       if (!config || !config.backendUrl || !config.token || !sessionId) return;
 
