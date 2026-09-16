@@ -138,7 +138,9 @@
       align-items: center;
       justify-content: center;
       user-select: none;
-      -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: manipulation;
     }
 
     #micBtn:hover {
@@ -146,9 +148,9 @@
     }
 
     #micBtn.listening {
-      background: #da3633;
-      border-color: #f85149;
-      box-shadow: 0 0 10px rgba(248, 81, 73, 0.5);
+      background: #da3633 !important;
+      border-color: #f85149 !important;
+      box-shadow: 0 0 10px rgba(248, 81, 73, 0.6);
       animation: pulse 1.2s infinite;
     }
 
@@ -223,15 +225,7 @@
       return div;
     }
 
-    // --- Audio Unlocking & TTS ---
-    let ttsPrimed = false;
-    function primeTTS() {
-      if (!("speechSynthesis" in window) || ttsPrimed) return;
-      const silent = new SpeechSynthesisUtterance("");
-      window.speechSynthesis.speak(silent);
-      ttsPrimed = true;
-    }
-
+    // --- Audio Feedback (TTS) ---
     function speak(text) {
       if (!("speechSynthesis" in window)) return;
       window.speechSynthesis.cancel();
@@ -248,80 +242,16 @@
       window.speechSynthesis.speak(utterance);
     }
 
-    // --- Universal Speech-to-Text Controller ---
+    // --- Speech Recognition (STT for Mobile Safari) ---
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
     let isListening = false;
-    let mediaRecorder = null;
-    let audioChunks = [];
 
-    // Fallback: Direct Audio Recording via getUserMedia (Supported Everywhere)
-    async function startFallbackRecording() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
-
-        mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) audioChunks.push(e.data);
-        };
-
-        mediaRecorder.onstop = async () => {
-          stream.getTracks().forEach(track => track.stop());
-          if (audioChunks.length === 0) return;
-
-          const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || "audio/webm" });
-          const pending = addMessage("assistant", "Transcribing audio...");
-          pending.classList.add("pending");
-
-          try {
-            const formData = new FormData();
-            formData.append("file", audioBlob, "speech.webm");
-
-            const res = await fetch(`${config.backendUrl}/transcribe`, {
-              method: "POST",
-              headers: { "Authorization": "Bearer " + config.token },
-              body: formData
-            });
-
-            if (!res.ok) throw new Error("Transcription request failed");
-            const data = await res.json();
-            pending.remove();
-
-            if (data.text) {
-              input.value = data.text;
-              submitChatMessage(data.text);
-            }
-          } catch (err) {
-            pending.textContent = "Voice transcription failed: " + err.message;
-            pending.classList.remove("pending");
-          }
-        };
-
-        mediaRecorder.start();
-        isListening = true;
-        micBtn.classList.add("listening");
-      } catch (err) {
-        console.error("Microphone access denied:", err);
-        alert("Please allow microphone access to use voice commands.");
-      }
-    }
-
-    function stopFallbackRecording() {
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.stop();
-      }
-      isListening = false;
-      micBtn.classList.remove("listening");
-    }
-
-    // Initialize Web Speech API if natively functional
     if (SpeechRecognition) {
       recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = false;
       recognition.lang = "en-US";
-      recognition.maxAlternatives = 1;
 
       recognition.onstart = () => {
         isListening = true;
@@ -329,6 +259,9 @@
       };
 
       recognition.onresult = (event) => {
+        isListening = false;
+        micBtn.classList.remove("listening");
+
         if (event.results && event.results[0] && event.results[0][0]) {
           const transcript = event.results[0][0].transcript;
           input.value = transcript;
@@ -337,42 +270,39 @@
       };
 
       recognition.onerror = (event) => {
-        console.warn("Native recognition error, using audio fallback:", event.error);
-        micBtn.classList.remove("listening");
         isListening = false;
+        micBtn.classList.remove("listening");
+        alert("Safari Speech Error: " + event.error);
       };
 
       recognition.onend = () => {
-        micBtn.classList.remove("listening");
         isListening = false;
+        micBtn.classList.remove("listening");
       };
-    }
 
-    // Unified Mic Button Action
-    micBtn.addEventListener("click", () => {
-      primeTTS();
+      // Pointerdown directly handles touch/tap without synthetic delay
+      const handleMicPress = (e) => {
+        e.preventDefault();
 
-      if (isListening) {
-        if (recognition) {
+        if (isListening) {
           try { recognition.stop(); } catch (_) {}
+          return;
         }
-        if (mediaRecorder) {
-          stopFallbackRecording();
-        }
-        return;
-      }
 
-      // Try browser recognition; fallback immediately to media recorder if it fails to start
-      if (recognition) {
         try {
           recognition.start();
-        } catch (e) {
-          startFallbackRecording();
+        } catch (err) {
+          alert("Could not start recognition: " + err.message);
         }
-      } else {
-        startFallbackRecording();
-      }
-    });
+      };
+
+      micBtn.addEventListener("pointerdown", handleMicPress);
+    } else {
+      micBtn.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        alert("Speech recognition is not supported on this browser engine.");
+      });
+    }
 
     // --- Message Dispatcher ---
     async function submitChatMessage(text) {
@@ -410,7 +340,6 @@
 
     form.addEventListener("submit", (e) => {
       e.preventDefault();
-      primeTTS();
       submitChatMessage(input.value.trim());
     });
 
