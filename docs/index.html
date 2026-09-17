@@ -248,14 +248,14 @@
 
     async function toggleRecording() {
       if (isRecording) {
-        if (mediaRecorder && mediaRecorder.state !== "inactive") {
-          mediaRecorder.stop();
-        }
-        isRecording = false;
-        micBtn.classList.remove("listening");
-        return;
-      }
-
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.requestData(); // Flush remaining data to chunks
+      mediaRecorder.stop();
+    }
+    isRecording = false;
+    micBtn.classList.remove("listening");
+    return;
+  }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioChunks = [];
@@ -313,7 +313,7 @@
           }
         };
 
-        mediaRecorder.start();
+        mediaRecorder.start(150);
         isRecording = true;
         micBtn.classList.add("listening");
       } catch (err) {

@@ -18,6 +18,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "your_secret_access_token")
