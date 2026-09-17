@@ -18,6 +18,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "your_secret_access_token")
@@ -186,25 +187,52 @@ async def get_chat_history(session_id: str, token: str = Depends(verify_token)):
     return {"messages": messages}
 
 @app.post("/transcribe")
+@app.post("/transcribe/")
 async def transcribe_audio(
     file: UploadFile = File(...),
     token: str = Depends(verify_token)
 ):
     try:
         audio_bytes = await file.read()
-        mime_type = file.content_type or "audio/mp4"
+
+        if not audio_bytes or len(audio_bytes) < 100:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Audio payload too small ({len(audio_bytes) if audio_bytes else 0} bytes)."
+            )
+
+        # Clean MIME type (Safari often appends codec details like 'audio/mp4;codecs=opus')
+        raw_mime = file.content_type or "audio/mp4"
+        clean_mime = raw_mime.split(";")[0].strip().lower()
+
+        # Fallback to audio/mp4 if octet-stream or unrecognized
+        if clean_mime in ["application/octet-stream", ""]:
+            clean_mime = "audio/mp4"
+
+        print(f"[ARGUS Transcribe] Received {len(audio_bytes)} bytes, detected MIME: {clean_mime}")
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
-                "Transcribe this speech verbatim. Output strictly the plain text transcription, with no explanations, extra formatting, or conversational replies."
+                types.Part.from_bytes(
+                    data=audio_bytes,
+                    mime_type=clean_mime
+                ),
+                "Transcribe this speech verbatim. Output strictly the plain text transcription, with no conversational filler or commentary."
             ]
         )
+
         transcription = response.text.strip() if response.text else ""
+        print(f"[ARGUS Transcribe] Result: '{transcription}'")
         return {"text": transcription}
+
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[ARGUS Transcribe Exception] Type: {type(e).__name__}, Message: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
+
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
