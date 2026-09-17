@@ -241,7 +241,7 @@ async def transcribe_audio(
             clean_mime = "audio/mp4"
 
         response = client.models.generate_content(
-            model="gemini-3.6-flash",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(data=audio_bytes, mime_type=clean_mime),
                 "Transcribe this speech verbatim. Output strictly the plain text transcription, with no conversational filler or commentary."
@@ -280,7 +280,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.6-flash",
+            model="gemini-2.5-flash",
             contents=chat_contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
