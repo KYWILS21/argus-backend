@@ -212,7 +212,7 @@ async def transcribe_audio(
         print(f"[ARGUS Transcribe] Received {len(audio_bytes)} bytes, detected MIME: {clean_mime}")
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=[
                 types.Part.from_bytes(
                     data=audio_bytes,
@@ -258,7 +258,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=chat_contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
