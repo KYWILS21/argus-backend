@@ -142,7 +142,7 @@ def list_facts() -> List[str]:
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
-    """Queries DuckDuckGo for live internet information, documentation, news, or general search."""
+    """Queries DuckDuckGo for live internet information, weather, news, or external documentation."""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -302,11 +302,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "web_search_tool",
-            "description": "Search the live web for current events, external documentation, weather, news, or general real-time lookups.",
+            "description": "Search the live web for current weather conditions, forecasts, news, sports scores, or real-time info. ALWAYS call this when asked about the weather.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query."}
+                    "query": {"type": "string", "description": "The search query (e.g., 'weather in Philadelphia PA today')."}
                 },
                 "required": ["query"]
             }
@@ -316,7 +316,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "save_fact_tool",
-            "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory (e.g., name, favorite algorithm, schedule preference).",
+            "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -463,24 +463,21 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
-    # 1. Fetch persistent long-term memories
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
 
-    # 2. Fetch session history
     history_records = get_history(session_id, limit=20)
     
     system_prompt = (
-        "You are ARGUS, an efficient personal AI executive assistant.\n"
-        "You have access to persistent SQLite memory, Google Calendar tools, and real-time Web Search.\n\n"
+        "You are ARGUS, an advanced AI executive assistant with live tool capabilities.\n"
+        "You have direct access to: Web Search (web_search_tool), Google Calendar (list_calendar_events, create_calendar_event, etc.), and persistent memory.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
-        "RULES FOR TOOLS & MEMORY:\n"
-        "1. Whenever the user shares a personal fact, preference, rule, identity detail, or asks you to remember something, call save_fact_tool.\n"
-        "2. When asked about current news, external websites, weather, recent developments, or questions requiring live information, call web_search_tool.\n"
-        "3. When asked about upcoming events, classes, or assignments, call list_calendar_events.\n"
-        "4. Use the PERMANENT USER FACTS listed above to address the user accurately.\n"
-        "5. Keep responses professional, direct, and concise."
+        "MANDATORY TOOL INSTRUCTIONS:\n"
+        "1. Real-time / Weather / News: You DO have access to live data via web_search_tool. NEVER claim you cannot access live data, real-time information, or the weather. ALWAYS invoke web_search_tool when the user asks about the weather, current news, sports, or live info.\n"
+        "2. Long-Term Facts: Call save_fact_tool whenever the user tells you their name, preferences, or details to store.\n"
+        "3. Calendar: Call list_calendar_events when asked about schedules, classes, Canvas events, or meetings.\n"
+        "4. Be direct, helpful, and concise."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -498,12 +495,11 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
             messages=messages,
             tools=tools_schema,
             tool_choice="auto",
-            temperature=0.7
+            temperature=0.5
         )
 
         response_msg = response.choices[0].message
         
-        # Tool execution loop
         if response_msg.tool_calls:
             messages.append({
                 "role": "assistant",
@@ -540,7 +536,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 model="openai/gpt-oss-20b",
                 messages=messages,
                 tools=tools_schema,
-                temperature=0.7
+                temperature=0.5
             )
             reply_text = second_response.choices[0].message.content or "Action processed."
         else:
