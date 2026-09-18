@@ -70,7 +70,6 @@ def verify_token(authorization: Optional[str] = Header(None)):
 def init_db():
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
-    # 1. Turn-by-turn chat messages
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +79,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # 2. Permanent long-term user facts and preferences
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,7 +125,7 @@ def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
     )
     conn.commit()
     conn.close()
-    return f"Saved to permanent memory: '{fact}'"
+    return f"Successfully committed to permanent memory: '{fact}'"
 
 def list_facts() -> List[str]:
     """Retrieves all saved long-term memories."""
@@ -139,7 +137,7 @@ def list_facts() -> List[str]:
     return [r[0] for r in rows]
 
 # ==============================================================================
-# Google Calendar Tools Suite (Multi-Calendar & Canvas Support)
+# Google Calendar Tools Suite
 # ==============================================================================
 
 def get_calendar_service():
@@ -281,7 +279,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "save_fact_tool",
-            "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory (e.g., user's name, favorite algorithm, schedule preferences).",
+            "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory (e.g., name, favorite algorithm, schedule preference).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -440,10 +438,10 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "RULES FOR MEMORY & CALENDAR:\n"
-        "1. Whenever the user shares a personal fact, preference, rule, identity detail (such as their name), or asks you to remember something permanently, call save_fact_tool.\n"
-        "2. Always utilize the PERMANENT USER FACTS listed above to answer questions about the user naturally.\n"
+        "1. Whenever the user shares a personal fact, preference, rule, identity detail, or instructs you to remember something, call save_fact_tool.\n"
+        "2. Use the PERMANENT USER FACTS listed above to answer questions about the user directly.\n"
         "3. When asked about upcoming events, classes, or assignments, call list_calendar_events.\n"
-        "4. Never say you cannot remember details across sessions if they are present in your PERMANENT USER FACTS or tool capabilities."
+        "4. Keep responses professional, direct, and concise."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -468,7 +466,23 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         
         # Tool execution loop
         if response_msg.tool_calls:
-            messages.append(response_msg)
+            # Append model message with tool calls using a dict format compatible with Groq
+            messages.append({
+                "role": "assistant",
+                "content": response_msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in response_msg.tool_calls
+                ]
+            })
+
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
@@ -484,9 +498,11 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": str(fn_result)
                 })
 
+            # Send follow-up request with tools declared to satisfy the protocol
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
+                tools=tools_schema,
                 temperature=0.7
             )
             reply_text = second_response.choices[0].message.content or "Action processed."
