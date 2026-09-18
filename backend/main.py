@@ -88,9 +88,11 @@ init_db()
 def save_message(session_id: str, role: str, content: str):
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
+    # Explicitly supply created_at so SQLite never encounters a NULL value
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     cursor.execute(
-        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content)
+        "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (session_id, role, content, now_iso)
     )
     conn.commit()
     conn.close()
