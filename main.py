@@ -20,20 +20,20 @@ except ImportError:
 # Configuration & Initialization
 # ==============================================================================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL", "argus.db")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 app = FastAPI(title="ARGUS API", version="2.0.0")
 
 # CORS middleware supporting GitHub Pages and local development origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.github\.io|http://localhost:.*|http://127\.0\.0\.1:.*",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -316,6 +316,9 @@ async def transcribe_audio(
     file: UploadFile = File(...),
     token: str = Depends(verify_token)
 ):
+    if not groq_client:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured in environment.")
+
     try:
         audio_bytes = await file.read()
         if not audio_bytes or len(audio_bytes) < 100:
@@ -341,6 +344,9 @@ async def transcribe_audio(
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
+    if not groq_client:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured in environment.")
+
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
     # 1. Fetch persistent history from SQLite
@@ -364,9 +370,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     save_message(session_id, "user", request.message)
 
     try:
-        # First completion with tool calling
+        # First completion with tool calling using active model
         response = groq_client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=messages,
             tools=tools_schema,
             tool_choice="auto",
@@ -395,7 +401,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             # Second completion to summarize the tool result
             second_response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 messages=messages,
                 temperature=0.7
             )
