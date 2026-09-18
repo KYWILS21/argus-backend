@@ -30,21 +30,20 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI(title="ARGUS API", version="2.0.0")
 
-origins = [
-    "https://kywils21.github.io",
-    "http://localhost:8000",
-    "http://localhost:3000",
-    "http://127.0.0.1:5500",
-]
-
+# Robust CORS matching GitHub Pages, local development, and custom domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origin_regex=r"https://.*\.github\.io|http://localhost:.*|http://127\.0\.0\.1:.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# Explicit OPTIONS handler to ensure CORS preflights succeed
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str):
+    return {"status": "ok"}
 
 # ==============================================================================
 # Security / Auth
@@ -88,7 +87,6 @@ init_db()
 def save_message(session_id: str, role: str, content: str):
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
-    # Explicitly supply created_at so SQLite never encounters a NULL value
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     cursor.execute(
         "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
@@ -197,15 +195,6 @@ def delete_calendar_event(event_id: str) -> str:
     except Exception as err:
         return f"Error deleting event: {str(err)}"
 
-# Tool configurations: Native Google Search + Calendar Callables
-tools_config = [
-    {"google_search": {}},
-    list_calendar_events,
-    create_calendar_event,
-    update_calendar_event,
-    delete_calendar_event
-]
-
 # ==============================================================================
 # Pydantic Schemas
 # ==============================================================================
@@ -250,7 +239,7 @@ async def transcribe_audio(
             clean_mime = "audio/mp4"
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=[
                 types.Part.from_bytes(data=audio_bytes, mime_type=clean_mime),
                 "Transcribe this speech verbatim. Output strictly the plain text transcription, with no conversational filler or commentary."
@@ -265,9 +254,6 @@ async def transcribe_audio(
     except Exception as e:
         print(f"[ARGUS Transcribe Exception] {repr(e)}")
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
-
-# Configure Google Search Grounding cleanly
-search_tool = types.Tool(google_search=types.GoogleSearch())
 
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
@@ -286,11 +272,15 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     system_instruction = (
         "You are ARGUS, an efficient personal AI executive assistant. "
-        "Use Google Search for current events, news, or factual lookups. "
-        "Keep responses direct and concise."
+        "You have access to Google Calendar management tools and Google Search. "
+        "Use Google Search for real-time news, current events, or web lookups. "
+        "Keep responses direct, professional, and concise."
     )
 
+    search_tool = types.Tool(google_search=types.GoogleSearch())
+
     try:
+        # First attempt: With real-time Google Search grounding
         response = client.models.generate_content(
             model="gemini-3.6-flash",
             contents=chat_contents,
@@ -300,12 +290,28 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 temperature=0.7
             )
         )
-
-        reply_text = response.text or "Action completed."
-        save_message(session_id, "assistant", reply_text)
-        return ChatResponse(reply=reply_text, session_id=session_id)
+        reply_text = response.text or "Action processed."
 
     except Exception as e:
-        print(f"[ARGUS Error] /chat failed: {repr(e)}")
-        # Return a clean JSON error with CORS headers instead of crashing
-        raise HTTPException(status_code=500, detail=str(e))
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            print("[ARGUS Notice] Search quota exhausted; falling back to ungrounded generation.")
+            try:
+                # Fallback attempt: Standard offline generation without grounding tool
+                fallback_response = client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=chat_contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.7
+                    )
+                )
+                reply_text = fallback_response.text or "Action processed (offline mode)."
+            except Exception as inner_e:
+                print(f"[ARGUS Inner Fallback Error] {repr(inner_e)}")
+                reply_text = "ARGUS is currently experiencing heavy traffic. Please retry in a moment."
+        else:
+            print(f"[ARGUS Generation Error] {repr(e)}")
+            reply_text = f"ARGUS backend error: {str(e)}"
+
+    save_message(session_id, "assistant", reply_text)
+    return ChatResponse(reply=reply_text, session_id=session_id)
