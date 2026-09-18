@@ -323,7 +323,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     try:
         # 3. Create native AFC multi-turn chat session with persistent history + tools
         chat = client.chats.create(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
             history=chat_history,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
