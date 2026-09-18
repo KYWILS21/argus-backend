@@ -30,9 +30,16 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI(title="ARGUS API", version="2.0.0")
 
+origins = [
+    "https://kywils21.github.io",
+    "http://localhost:8000",
+    "http://localhost:3000",
+    "http://127.0.0.1:5500",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -261,6 +268,7 @@ async def transcribe_audio(
 search_tool = types.Tool(google_search=types.GoogleSearch())
 
 @app.post("/chat", response_model=ChatResponse)
+@app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     save_message(session_id, "user", request.message)
