@@ -114,10 +114,39 @@ def get_history(session_id: str, limit: int = 15) -> List[Dict[str, str]]:
 # ==============================================================================
 
 def get_calendar_service():
-    if not CALENDAR_AVAILABLE or not GOOGLE_CALENDAR_TOKEN:
+    if not CALENDAR_AVAILABLE:
+        print("[Calendar Error] google-auth or google-api-python-client not installed.")
         return None
+
+    # Check for individual environment variables configured in Railway
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+    access_token = os.getenv("ACCESS_TOKEN")
+
+    creds_info = None
+
+    if client_id and client_secret and refresh_token:
+        creds_info = {
+            "token": access_token,
+            "refresh_token": refresh_token,
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scopes": ["https://www.googleapis.com/auth/calendar"]
+        }
+    elif GOOGLE_CALENDAR_TOKEN:
+        try:
+            creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
+        except Exception as e:
+            print(f"[Calendar JSON Parse Error] {e}")
+            return None
+
+    if not creds_info:
+        print("[Calendar Error] Missing OAuth credentials in environment.")
+        return None
+
     try:
-        creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
         creds = Credentials.from_authorized_user_info(creds_info)
         return build("calendar", "v3", credentials=creds)
     except Exception as e:
