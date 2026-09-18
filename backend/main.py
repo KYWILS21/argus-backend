@@ -40,7 +40,7 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Explicit OPTIONS preflight handler to prevent CORS dropouts on mobile/Safari
+# Explicit OPTIONS preflight handler to prevent CORS dropouts
 @app.options("/{full_path:path}")
 async def preflight_handler(full_path: str):
     return {"status": "ok"}
@@ -269,16 +269,19 @@ async def transcribe_audio(
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
-    save_message(session_id, "user", request.message)
-
+    
+    # Retrieve previous history (excluding the current prompt)
     history_records = get_history(session_id, limit=10)
-    chat_contents = []
+    chat_history = []
     for r in history_records:
         role_label = "user" if r["role"] == "user" else "model"
-        chat_contents.append(types.Content(
+        chat_history.append(types.Content(
             role=role_label,
             parts=[types.Part.from_text(text=r["content"])]
         ))
+
+    # Persist the current user prompt to SQLite
+    save_message(session_id, "user", request.message)
 
     system_instruction = (
         "You are ARGUS, an efficient personal AI executive assistant. "
@@ -289,15 +292,17 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     )
 
     try:
-        response = client.models.generate_content(
+        # Initializing chat via client.chats.create enables Automatic Function Calling (AFC)
+        chat = client.chats.create(
             model="gemini-3.6-flash",
-            contents=chat_contents,
+            history=chat_history,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=calendar_tools,
                 temperature=0.7
             )
         )
+        response = chat.send_message(request.message)
         reply_text = response.text or "Action processed."
 
     except Exception as e:
