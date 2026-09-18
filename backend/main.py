@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
+from duckduckgo_search import DDGS
 
 # Optional Google Calendar dependencies
 try:
@@ -137,7 +138,29 @@ def list_facts() -> List[str]:
     return [r[0] for r in rows]
 
 # ==============================================================================
-# Google Calendar Tools Suite
+# Live Web Search Tool
+# ==============================================================================
+
+def web_search_tool(query: str, max_results: int = 5) -> str:
+    """Queries DuckDuckGo for live internet information, documentation, news, or general search."""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            if not results:
+                return f"No live search results found for query: '{query}'"
+            
+            output = []
+            for r in results:
+                title = r.get("title", "Untitled")
+                body = r.get("body", "No description provided.")
+                href = r.get("href", "")
+                output.append(f"• {title}\n  Summary: {body}\n  Source: {href}")
+            return "\n\n".join(output)
+    except Exception as e:
+        return f"Web search execution error: {str(e)}"
+
+# ==============================================================================
+# Google Calendar Tools Suite (Multi-Calendar & Canvas Support)
 # ==============================================================================
 
 def get_calendar_service():
@@ -278,6 +301,20 @@ tools_schema = [
     {
         "type": "function",
         "function": {
+            "name": "web_search_tool",
+            "description": "Search the live web for current events, external documentation, weather, news, or general real-time lookups.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "save_fact_tool",
             "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory (e.g., name, favorite algorithm, schedule preference).",
             "parameters": {
@@ -355,6 +392,7 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "web_search_tool": web_search_tool,
     "save_fact_tool": save_fact_tool,
     "list_calendar_events": list_calendar_events,
     "create_calendar_event": create_calendar_event,
@@ -434,14 +472,15 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     
     system_prompt = (
         "You are ARGUS, an efficient personal AI executive assistant.\n"
-        "You have access to persistent SQLite memory and Google Calendar tools.\n\n"
+        "You have access to persistent SQLite memory, Google Calendar tools, and real-time Web Search.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
-        "RULES FOR MEMORY & CALENDAR:\n"
-        "1. Whenever the user shares a personal fact, preference, rule, identity detail, or instructs you to remember something, call save_fact_tool.\n"
-        "2. Use the PERMANENT USER FACTS listed above to answer questions about the user directly.\n"
+        "RULES FOR TOOLS & MEMORY:\n"
+        "1. Whenever the user shares a personal fact, preference, rule, identity detail, or asks you to remember something, call save_fact_tool.\n"
+        "2. When asked about current news, external websites, weather, recent developments, or questions requiring live information, call web_search_tool.\n"
         "3. When asked about upcoming events, classes, or assignments, call list_calendar_events.\n"
-        "4. Keep responses professional, direct, and concise."
+        "4. Use the PERMANENT USER FACTS listed above to address the user accurately.\n"
+        "5. Keep responses professional, direct, and concise."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -466,7 +505,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         
         # Tool execution loop
         if response_msg.tool_calls:
-            # Append model message with tool calls using a dict format compatible with Groq
             messages.append({
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -498,7 +536,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": str(fn_result)
                 })
 
-            # Send follow-up request with tools declared to satisfy the protocol
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
