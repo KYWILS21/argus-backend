@@ -96,7 +96,7 @@ def save_message(session_id: str, role: str, content: str):
     conn.commit()
     conn.close()
 
-def get_history(session_id: str, limit: int = 15) -> List[Dict[str, str]]:
+def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute(
@@ -162,7 +162,7 @@ def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 
         ).execute()
         events = events_result.get('items', [])
         if not events:
-            return "No upcoming events found."
+            return "No upcoming events found on primary calendar."
         
         result = []
         for e in events:
@@ -186,7 +186,7 @@ def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, 
             'end': {'dateTime': end_time_iso},
         }
         created = service.events().insert(calendarId='primary', body=event).execute()
-        return f"Event created: '{created.get('summary')}' (ID: {created.get('id')})"
+        return f"Event created successfully: '{created.get('summary')}' (ID: {created.get('id')})"
     except Exception as err:
         return f"Error creating event: {str(err)}"
 
@@ -203,7 +203,7 @@ def update_calendar_event(event_id: str, summary: Optional[str] = None, start_ti
         if end_time_iso:
             event['end'] = {'dateTime': end_time_iso}
         updated = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
-        return f"Event updated: '{updated.get('summary')}'"
+        return f"Event updated successfully: '{updated.get('summary')}'"
     except Exception as err:
         return f"Error updating event: {str(err)}"
 
@@ -241,8 +241,8 @@ tools_schema = [
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string", "description": "Title of the event."},
-                    "start_time_iso": {"type": "string", "description": "Start ISO datetime."},
-                    "end_time_iso": {"type": "string", "description": "End ISO datetime."},
+                    "start_time_iso": {"type": "string", "description": "Start ISO datetime string."},
+                    "end_time_iso": {"type": "string", "description": "End ISO datetime string."},
                     "description": {"type": "string", "description": "Optional description."}
                 },
                 "required": ["summary", "start_time_iso", "end_time_iso"]
@@ -349,27 +349,33 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
     # 1. Fetch persistent history from SQLite
-    history_records = get_history(session_id, limit=10)
+    history_records = get_history(session_id, limit=20)
+    
+    # Precise system instruction detailing identity, tools, and SQLite session memory
     messages = [
         {
             "role": "system",
             "content": (
                 "You are ARGUS, an efficient personal AI executive assistant. "
-                "You have direct access to the user's primary Google Calendar via tool functions. "
-                "Maintain conversational continuity using past messages. Keep responses direct and concise."
+                "You are connected to an SQLite backend database that provides conversation memory for this active session. "
+                "You have live access to Google Calendar via tool functions: list_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. "
+                "When the user asks about their schedule or events, always invoke list_calendar_events. "
+                "Never say you cannot remember things within the session; use the conversation history provided. "
+                "Keep responses professional, direct, and concise."
             )
         }
     ]
+    
     for r in history_records:
         role_label = "user" if r["role"] == "user" else "assistant"
         messages.append({"role": role_label, "content": r["content"]})
 
-    # Add current prompt and save
+    # 2. Append current user prompt and persist to SQLite
     messages.append({"role": "user", "content": request.message})
     save_message(session_id, "user", request.message)
 
     try:
-        # First completion using active replacement model openai/gpt-oss-20b
+        # First completion to decide tool calls
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=messages,
@@ -380,7 +386,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
         response_msg = response.choices[0].message
         
-        # Check if model requested a calendar function call
+        # Check if the model decided to call a calendar function
         if response_msg.tool_calls:
             messages.append(response_msg)
             for tool_call in response_msg.tool_calls:
@@ -398,7 +404,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": str(fn_result)
                 })
 
-            # Second completion to summarize the tool result
+            # Second completion to summarize the tool execution result
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
@@ -412,5 +418,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         print(f"[ARGUS Groq Error] {repr(e)}")
         reply_text = f"ARGUS backend error: {str(e)}"
 
+    # 3. Save assistant reply to SQLite
     save_message(session_id, "assistant", reply_text)
     return ChatResponse(reply=reply_text, session_id=session_id)
