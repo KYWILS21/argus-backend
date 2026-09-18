@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
-# Optional Google Calendar imports
+# Optional Google Calendar dependencies
 try:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -30,7 +30,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI(title="ARGUS API", version="2.0.0")
 
-# Robust CORS matching GitHub Pages, local development, and custom domains
+# CORS middleware supporting GitHub Pages and local development origins
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://.*\.github\.io|http://localhost:.*|http://127\.0\.0\.1:.*",
@@ -40,7 +40,7 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Explicit OPTIONS handler to ensure CORS preflights succeed
+# Explicit OPTIONS preflight handler to prevent CORS dropouts on mobile/Safari
 @app.options("/{full_path:path}")
 async def preflight_handler(full_path: str):
     return {"status": "ok"}
@@ -55,7 +55,10 @@ def verify_token(authorization: Optional[str] = Header(None)):
     
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid Authorization header format. Expected 'Bearer <token>'.")
+        raise HTTPException(
+            status_code=401, 
+            detail="Invalid Authorization header format. Expected 'Bearer <token>'."
+        )
     
     token = parts[1]
     if token != ARGUS_BEARER_TOKEN:
@@ -195,6 +198,22 @@ def delete_calendar_event(event_id: str) -> str:
     except Exception as err:
         return f"Error deleting event: {str(err)}"
 
+# Tool groups
+calendar_tools = [
+    list_calendar_events,
+    create_calendar_event,
+    update_calendar_event,
+    delete_calendar_event,
+]
+
+combined_tools = [
+    types.Tool(google_search=types.GoogleSearch()),
+    list_calendar_events,
+    create_calendar_event,
+    update_calendar_event,
+    delete_calendar_event,
+]
+
 # ==============================================================================
 # Pydantic Schemas
 # ==============================================================================
@@ -272,43 +291,43 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     system_instruction = (
         "You are ARGUS, an efficient personal AI executive assistant. "
-        "You have access to Google Calendar management tools and Google Search. "
-        "Use Google Search for real-time news, current events, or web lookups. "
+        "You have access to Google Calendar tools and Google Search. "
+        "Use Google Search when you need live web facts, current events, or external data. "
+        "Use your calendar tools when managing the user's schedule, meetings, and agenda. "
         "Keep responses direct, professional, and concise."
     )
 
-    search_tool = types.Tool(google_search=types.GoogleSearch())
-
     try:
-        # First attempt: With real-time Google Search grounding
+        # Primary attempt: Both Google Search and Calendar tools active
         response = client.models.generate_content(
             model="gemini-3.6-flash",
             contents=chat_contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                tools=[search_tool],
+                tools=combined_tools,
                 temperature=0.7
             )
         )
         reply_text = response.text or "Action processed."
 
     except Exception as e:
+        # Graceful fallback: If search quota trips 429, fall back to calendar-only mode
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            print("[ARGUS Notice] Search quota exhausted; falling back to ungrounded generation.")
+            print("[ARGUS Notice] Search quota exhausted; falling back to calendar-only execution.")
             try:
-                # Fallback attempt: Standard offline generation without grounding tool
                 fallback_response = client.models.generate_content(
                     model="gemini-3.6-flash",
                     contents=chat_contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
+                        tools=calendar_tools,
                         temperature=0.7
                     )
                 )
-                reply_text = fallback_response.text or "Action processed (offline mode)."
-            except Exception as inner_e:
-                print(f"[ARGUS Inner Fallback Error] {repr(inner_e)}")
-                reply_text = "ARGUS is currently experiencing heavy traffic. Please retry in a moment."
+                reply_text = fallback_response.text or "Action processed (calendar mode)."
+            except Exception as fallback_err:
+                print(f"[ARGUS Calendar Fallback Error] {repr(fallback_err)}")
+                reply_text = "ARGUS is currently experiencing heavy load. Please retry in a moment."
         else:
             print(f"[ARGUS Generation Error] {repr(e)}")
             reply_text = f"ARGUS backend error: {str(e)}"
