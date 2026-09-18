@@ -272,40 +272,42 @@ search_tool = types.Tool(google_search=types.GoogleSearch())
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
-    session_id = request.session_id or str(datetime.datetime.now().timestamp())
-    save_message(session_id, "user", request.message)
-
-    history_records = get_history(session_id, limit=10)
-    chat_contents = []
-    for r in history_records:
-        role_label = "user" if r["role"] == "user" else "model"
-        chat_contents.append(types.Content(
-            role=role_label,
-            parts=[types.Part.from_text(text=r["content"])]
-        ))
-
-    system_instruction = (
-        "You are ARGUS, an efficient personal AI executive assistant. "
-        "Use Google Search for current events, news, or factual lookups. "
-        "Keep responses direct and concise."
-    )
-
     try:
+        session_id = request.session_id or str(datetime.datetime.now().timestamp())
+        save_message(session_id, "user", request.message)
+
+        history_records = get_history(session_id, limit=10)
+        chat_contents = []
+        for r in history_records:
+            role_label = "user" if r["role"] == "user" else "model"
+            chat_contents.append(types.Content(
+                role=role_label,
+                parts=[types.Part.from_text(text=r["content"])]
+            ))
+
+        system_instruction = (
+            "You are ARGUS, an efficient personal AI executive assistant. "
+            "Keep responses direct, helpful, and concise."
+        )
+
+        # Calling without search tools to bypass the strict free-tier grounding quota
         response = client.models.generate_content(
             model="gemini-3.6-flash",
             contents=chat_contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                tools=[search_tool],
                 temperature=0.7
             )
         )
 
-        reply_text = response.text or "Action completed."
+        reply_text = response.text or "Action processed."
         save_message(session_id, "assistant", reply_text)
         return ChatResponse(reply=reply_text, session_id=session_id)
 
     except Exception as e:
         print(f"[ARGUS Error] /chat failed: {repr(e)}")
-        # Return a clean JSON error with CORS headers instead of crashing
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return the error message inside the payload so FastAPI returns 200 with CORS intact
+        return ChatResponse(
+            reply=f"ARGUS Backend Notice: {str(e)}", 
+            session_id=request.session_id or "default"
+        )
