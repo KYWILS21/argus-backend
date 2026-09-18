@@ -108,7 +108,7 @@ def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
 # ==============================================================================
-# Google Calendar Tools Suite
+# Google Calendar Tools Suite (Multi-Calendar & Canvas Support)
 # ==============================================================================
 
 def get_calendar_service():
@@ -147,32 +147,63 @@ def get_calendar_service():
         print(f"[Calendar Auth Error] {e}")
         return None
 
-def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 10) -> str:
+def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
+    """Lists upcoming events across all calendars, including Canvas feeds and secondary calendars."""
     service = get_calendar_service()
     if not service:
         return "Google Calendar integration is not active or credentials are missing."
+
     try:
         now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
-        events_result = service.events().list(
-            calendarId='primary',
-            timeMin=now,
-            maxResults=max_results,
-            singleEvents=True,
-            orderBy='startTime'
-        ).execute()
-        events = events_result.get('items', [])
-        if not events:
-            return "No upcoming events found on primary calendar."
         
+        # 1. Fetch all calendars the user has subscribed to (Primary, Canvas feeds, etc.)
+        calendar_list = service.calendarList().list().execute().get('items', [])
+        if not calendar_list:
+            calendar_list = [{'id': 'primary', 'summary': 'Primary'}]
+
+        all_events = []
+
+        # 2. Iterate through each calendar to aggregate events
+        for cal in calendar_list:
+            cal_id = cal.get('id')
+            cal_name = cal.get('summary', 'Calendar')
+
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=now,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+
+                for item in events_result.get('items', []):
+                    start_val = item.get('start', {}).get('dateTime', item.get('start', {}).get('date'))
+                    all_events.append({
+                        'calendar': cal_name,
+                        'summary': item.get('summary', 'Untitled Event'),
+                        'start': start_val,
+                        'id': item.get('id')
+                    })
+            except Exception as cal_err:
+                # Skip calendars with restricted permissions without failing the whole lookup
+                print(f"[Calendar Read Skip] Could not read {cal_name}: {cal_err}")
+                continue
+
+        if not all_events:
+            return "No upcoming events found on any connected calendar (including Canvas feeds)."
+
+        # 3. Sort all events chronologically across calendars
+        all_events.sort(key=lambda x: x['start'] if x['start'] else "")
+
         result = []
-        for e in events:
-            start = e.get('start', {}).get('dateTime', e.get('start', {}).get('date'))
-            summary = e.get('summary', 'Untitled Event')
-            eid = e.get('id')
-            result.append(f"- {summary} (Starts: {start}, ID: {eid})")
+        for e in all_events[:max_results]:
+            result.append(f"- [{e['calendar']}] {e['summary']} (Starts: {e['start']}, ID: {e['id']})")
+        
         return "\n".join(result)
+
     except Exception as err:
-        return f"Error fetching events: {str(err)}"
+        return f"Error fetching multi-calendar events: {str(err)}"
 
 def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
     service = get_calendar_service()
@@ -222,7 +253,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "list_calendar_events",
-            "description": "Lists upcoming events from the user's primary Google Calendar.",
+            "description": "Lists upcoming events across all calendars including Canvas feeds, school schedules, and primary calendar.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -236,7 +267,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "create_calendar_event",
-            "description": "Creates a new event on the user's Google Calendar.",
+            "description": "Creates a new event on the user's primary calendar.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -351,7 +382,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     # 1. Fetch persistent history from SQLite
     history_records = get_history(session_id, limit=20)
     
-    # Precise system instruction detailing identity, tools, and SQLite session memory
     messages = [
         {
             "role": "system",
@@ -359,7 +389,8 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 "You are ARGUS, an efficient personal AI executive assistant. "
                 "You are connected to an SQLite backend database that provides conversation memory for this active session. "
                 "You have live access to Google Calendar via tool functions: list_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. "
-                "When the user asks about their schedule or events, always invoke list_calendar_events. "
+                "The list_calendar_events tool queries all connected calendars including Canvas feeds and academic schedules. "
+                "When the user asks about upcoming classes, assignments, schedules, or events, always invoke list_calendar_events. "
                 "Never say you cannot remember things within the session; use the conversation history provided. "
                 "Keep responses professional, direct, and concise."
             )
@@ -375,7 +406,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     save_message(session_id, "user", request.message)
 
     try:
-        # First completion to decide tool calls
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=messages,
@@ -386,7 +416,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
         response_msg = response.choices[0].message
         
-        # Check if the model decided to call a calendar function
+        # Tool call execution loop
         if response_msg.tool_calls:
             messages.append(response_msg)
             for tool_call in response_msg.tool_calls:
@@ -404,7 +434,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": str(fn_result)
                 })
 
-            # Second completion to summarize the tool execution result
+            # Final response after tool execution
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
