@@ -257,6 +257,7 @@ async def transcribe_audio(
         print(f"[ARGUS Transcribe Exception] {repr(e)}")
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
 
+# Configure Google Search Grounding cleanly
 search_tool = types.Tool(google_search=types.GoogleSearch())
 
 @app.post("/chat", response_model=ChatResponse)
