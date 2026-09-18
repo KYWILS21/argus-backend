@@ -198,16 +198,7 @@ def delete_calendar_event(event_id: str) -> str:
     except Exception as err:
         return f"Error deleting event: {str(err)}"
 
-# Tool groups
 calendar_tools = [
-    list_calendar_events,
-    create_calendar_event,
-    update_calendar_event,
-    delete_calendar_event,
-]
-
-combined_tools = [
-    types.Tool(google_search=types.GoogleSearch()),
     list_calendar_events,
     create_calendar_event,
     update_calendar_event,
@@ -291,46 +282,27 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     system_instruction = (
         "You are ARGUS, an efficient personal AI executive assistant. "
-        "You have access to Google Calendar tools and Google Search. "
-        "Use Google Search when you need live web facts, current events, or external data. "
-        "Use your calendar tools when managing the user's schedule, meetings, and agenda. "
+        "You have direct access to the user's primary Google Calendar via tool functions. "
+        "When the user asks about their schedule, meetings, or calendar events, call list_calendar_events. "
+        "When the user asks to schedule, change, or cancel events, use the appropriate calendar tool. "
         "Keep responses direct, professional, and concise."
     )
 
     try:
-        # Primary attempt: Both Google Search and Calendar tools active
         response = client.models.generate_content(
             model="gemini-3.6-flash",
             contents=chat_contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                tools=combined_tools,
+                tools=calendar_tools,
                 temperature=0.7
             )
         )
         reply_text = response.text or "Action processed."
 
     except Exception as e:
-        # Graceful fallback: If search quota trips 429, fall back to calendar-only mode
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            print("[ARGUS Notice] Search quota exhausted; falling back to calendar-only execution.")
-            try:
-                fallback_response = client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=chat_contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        tools=calendar_tools,
-                        temperature=0.7
-                    )
-                )
-                reply_text = fallback_response.text or "Action processed (calendar mode)."
-            except Exception as fallback_err:
-                print(f"[ARGUS Calendar Fallback Error] {repr(fallback_err)}")
-                reply_text = "ARGUS is currently experiencing heavy load. Please retry in a moment."
-        else:
-            print(f"[ARGUS Generation Error] {repr(e)}")
-            reply_text = f"ARGUS backend error: {str(e)}"
+        print(f"[ARGUS Error] /chat failed: {repr(e)}")
+        reply_text = f"ARGUS backend error: {str(e)}"
 
     save_message(session_id, "assistant", reply_text)
     return ChatResponse(reply=reply_text, session_id=session_id)
