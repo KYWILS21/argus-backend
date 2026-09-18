@@ -366,7 +366,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     try:
         # First completion with tool calling
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-70b-versatile",
             messages=messages,
             tools=tools_schema,
             tool_choice="auto",
