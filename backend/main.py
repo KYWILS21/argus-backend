@@ -6,8 +6,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google import genai
-from google.genai import types
+from groq import Groq
 
 # Optional Google Calendar dependencies
 try:
@@ -21,12 +20,12 @@ except ImportError:
 # Configuration & Initialization
 # ==============================================================================
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL", "argus.db")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 app = FastAPI(title="ARGUS API", version="2.0.0")
 
@@ -40,7 +39,6 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Explicit OPTIONS preflight handler to prevent CORS dropouts
 @app.options("/{full_path:path}")
 async def preflight_handler(full_path: str):
     return {"status": "ok"}
@@ -115,17 +113,14 @@ def get_history(session_id: str, limit: int = 15) -> List[Dict[str, str]]:
 
 def get_calendar_service():
     if not CALENDAR_AVAILABLE:
-        print("[Calendar Error] google-auth or google-api-python-client not installed.")
         return None
 
-    # Check for individual environment variables configured in Railway
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
     refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
     access_token = os.getenv("ACCESS_TOKEN")
 
     creds_info = None
-
     if client_id and client_secret and refresh_token:
         creds_info = {
             "token": access_token,
@@ -143,7 +138,6 @@ def get_calendar_service():
             return None
 
     if not creds_info:
-        print("[Calendar Error] Missing OAuth credentials in environment.")
         return None
 
     try:
@@ -154,10 +148,9 @@ def get_calendar_service():
         return None
 
 def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 10) -> str:
-    """Lists upcoming events from the user's primary Google Calendar."""
     service = get_calendar_service()
     if not service:
-        return "Google Calendar integration is not active or token is invalid."
+        return "Google Calendar integration is not active or credentials are missing."
     try:
         now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
         events_result = service.events().list(
@@ -182,10 +175,9 @@ def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 
         return f"Error fetching events: {str(err)}"
 
 def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
-    """Creates a new event on the user's primary Google Calendar."""
     service = get_calendar_service()
     if not service:
-        return "Google Calendar integration is not active or token is invalid."
+        return "Google Calendar integration is not active or credentials are missing."
     try:
         event = {
             'summary': summary,
@@ -199,10 +191,9 @@ def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, 
         return f"Error creating event: {str(err)}"
 
 def update_calendar_event(event_id: str, summary: Optional[str] = None, start_time_iso: Optional[str] = None, end_time_iso: Optional[str] = None) -> str:
-    """Updates an existing event on the primary Google Calendar."""
     service = get_calendar_service()
     if not service:
-        return "Google Calendar integration is not active or token is invalid."
+        return "Google Calendar integration is not active or credentials are missing."
     try:
         event = service.events().get(calendarId='primary', eventId=event_id).execute()
         if summary:
@@ -217,25 +208,90 @@ def update_calendar_event(event_id: str, summary: Optional[str] = None, start_ti
         return f"Error updating event: {str(err)}"
 
 def delete_calendar_event(event_id: str) -> str:
-    """Deletes an event from the user's primary Google Calendar."""
     service = get_calendar_service()
     if not service:
-        return "Google Calendar integration is not active or token is invalid."
+        return "Google Calendar integration is not active or credentials are missing."
     try:
         service.events().delete(calendarId='primary', eventId=event_id).execute()
         return f"Event {event_id} deleted successfully."
     except Exception as err:
         return f"Error deleting event: {str(err)}"
 
-calendar_tools = [
-    list_calendar_events,
-    create_calendar_event,
-    update_calendar_event,
-    delete_calendar_event,
+# Standard tool definitions for Groq
+tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_events",
+            "description": "Lists upcoming events from the user's primary Google Calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time_min_iso": {"type": "string", "description": "ISO timestamp to list events from."},
+                    "max_results": {"type": "integer", "description": "Maximum number of events to return."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "Creates a new event on the user's Google Calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Title of the event."},
+                    "start_time_iso": {"type": "string", "description": "Start ISO datetime."},
+                    "end_time_iso": {"type": "string", "description": "End ISO datetime."},
+                    "description": {"type": "string", "description": "Optional description."}
+                },
+                "required": ["summary", "start_time_iso", "end_time_iso"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_calendar_event",
+            "description": "Updates an existing event on the primary Google Calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "Event ID to update."},
+                    "summary": {"type": "string"},
+                    "start_time_iso": {"type": "string"},
+                    "end_time_iso": {"type": "string"}
+                },
+                "required": ["event_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_calendar_event",
+            "description": "Deletes an event from the user's primary Google Calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "Event ID to delete."}
+                },
+                "required": ["event_id"]
+            }
+        }
+    }
 ]
 
+tool_dispatch = {
+    "list_calendar_events": list_calendar_events,
+    "create_calendar_event": create_calendar_event,
+    "update_calendar_event": update_calendar_event,
+    "delete_calendar_event": delete_calendar_event
+}
+
 # ==============================================================================
-# Pydantic Models
+# Pydantic Models & Endpoints
 # ==============================================================================
 
 class ChatRequest(BaseModel):
@@ -245,10 +301,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
-
-# ==============================================================================
-# Endpoints
-# ==============================================================================
 
 @app.get("/health")
 def health_check():
@@ -272,26 +324,18 @@ async def transcribe_audio(
                 detail=f"Audio payload too small ({len(audio_bytes) if audio_bytes else 0} bytes)."
             )
 
-        raw_mime = file.content_type or "audio/mp4"
-        clean_mime = raw_mime.split(";")[0].strip().lower()
-        if clean_mime in ["application/octet-stream", ""]:
-            clean_mime = "audio/mp4"
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=audio_bytes, mime_type=clean_mime),
-                "Transcribe this speech verbatim. Output strictly the plain text transcription, with no conversational filler or commentary."
-            ]
+        filename = file.filename or "recording.m4a"
+        transcription = groq_client.audio.transcriptions.create(
+            file=(filename, audio_bytes),
+            model="whisper-large-v3",
+            response_format="text"
         )
-
-        transcription = response.text.strip() if response.text else ""
-        return {"text": transcription}
+        return {"text": str(transcription).strip()}
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[ARGUS Transcribe Exception] {repr(e)}")
+        print(f"[ARGUS Transcribe Error] {repr(e)}")
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
 
 @app.post("/chat", response_model=ChatResponse)
@@ -299,45 +343,69 @@ async def transcribe_audio(
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
-    # 1. Fetch persistent history from SQLite for memory
+    # 1. Fetch persistent history from SQLite
     history_records = get_history(session_id, limit=10)
-    chat_history = []
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are ARGUS, an efficient personal AI executive assistant. "
+                "You have direct access to the user's primary Google Calendar via tool functions. "
+                "Maintain conversational continuity using past messages. Keep responses direct and concise."
+            )
+        }
+    ]
     for r in history_records:
-        role_label = "user" if r["role"] == "user" else "model"
-        chat_history.append(types.Content(
-            role=role_label,
-            parts=[types.Part.from_text(text=r["content"])]
-        ))
+        role_label = "user" if r["role"] == "user" else "assistant"
+        messages.append({"role": role_label, "content": r["content"]})
 
-    # 2. Record incoming user prompt into SQLite
+    # Add current prompt and save
+    messages.append({"role": "user", "content": request.message})
     save_message(session_id, "user", request.message)
 
-    system_instruction = (
-        "You are ARGUS, an efficient personal AI executive assistant. "
-        "You have full access to the user's primary Google Calendar via tool functions. "
-        "When the user asks about their schedule, meetings, or calendar events, call list_calendar_events. "
-        "When the user asks to schedule, change, or cancel events, call the corresponding calendar tool. "
-        "Maintain conversation context from previous turns. Keep responses direct, professional, and concise."
-    )
-
     try:
-        # 3. Create native AFC multi-turn chat session with persistent history + tools
-        chat = client.chats.create(
-            model="gemini-2.5-flash-lite",
-            history=chat_history,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                tools=calendar_tools,
+        # First completion with tool calling
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            tools=tools_schema,
+            tool_choice="auto",
+            temperature=0.7
+        )
+
+        response_msg = response.choices[0].message
+        
+        # Check if model requested a calendar function call
+        if response_msg.tool_calls:
+            messages.append(response_msg)
+            for tool_call in response_msg.tool_calls:
+                fn_name = tool_call.function.name
+                fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                
+                if fn_name in tool_dispatch:
+                    fn_result = tool_dispatch[fn_name](**fn_args)
+                else:
+                    fn_result = f"Error: Function {fn_name} not found."
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": str(fn_result)
+                })
+
+            # Second completion to summarize the tool result
+            second_response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
                 temperature=0.7
             )
-        )
-        response = chat.send_message(request.message)
-        reply_text = response.text or "Action processed."
+            reply_text = second_response.choices[0].message.content or "Action processed."
+        else:
+            reply_text = response_msg.content or "Action processed."
 
     except Exception as e:
-        print(f"[ARGUS /chat Error] {repr(e)}")
-        reply_text = f"ARGUS backend notice: {str(e)}"
+        print(f"[ARGUS Groq Error] {repr(e)}")
+        reply_text = f"ARGUS backend error: {str(e)}"
 
-    # 4. Record assistant reply into SQLite
     save_message(session_id, "assistant", reply_text)
     return ChatResponse(reply=reply_text, session_id=session_id)
