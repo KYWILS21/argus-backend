@@ -23,13 +23,12 @@ except ImportError:
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL", "argus.db")
+DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 app = FastAPI(title="ARGUS API", version="2.0.0")
 
-# CORS middleware supporting GitHub Pages and local development origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -65,18 +64,28 @@ def verify_token(authorization: Optional[str] = Header(None)):
     return token
 
 # ==============================================================================
-# Database & Conversation Memory
+# Database & Conversation Memory (Short-Term + Long-Term)
 # ==============================================================================
 
 def init_db():
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
+    # 1. Turn-by-turn chat messages
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # 2. Permanent long-term user facts and preferences
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact TEXT NOT NULL,
+            category TEXT DEFAULT 'general',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -106,6 +115,28 @@ def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
     rows = cursor.fetchall()
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
+    """Saves a permanent fact or user detail into long-term memory."""
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT INTO user_memories (fact, category, created_at) VALUES (?, ?, ?)",
+        (fact, category or "general", now_iso)
+    )
+    conn.commit()
+    conn.close()
+    return f"Saved to permanent memory: '{fact}'"
+
+def list_facts() -> List[str]:
+    """Retrieves all saved long-term memories."""
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("SELECT fact FROM user_memories ORDER BY id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 # ==============================================================================
 # Google Calendar Tools Suite (Multi-Calendar & Canvas Support)
@@ -148,22 +179,17 @@ def get_calendar_service():
         return None
 
 def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
-    """Lists upcoming events across all calendars, including Canvas feeds and secondary calendars."""
     service = get_calendar_service()
     if not service:
         return "Google Calendar integration is not active or credentials are missing."
 
     try:
         now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
-        
-        # 1. Fetch all calendars the user has subscribed to (Primary, Canvas feeds, etc.)
         calendar_list = service.calendarList().list().execute().get('items', [])
         if not calendar_list:
             calendar_list = [{'id': 'primary', 'summary': 'Primary'}]
 
         all_events = []
-
-        # 2. Iterate through each calendar to aggregate events
         for cal in calendar_list:
             cal_id = cal.get('id')
             cal_name = cal.get('summary', 'Calendar')
@@ -186,14 +212,12 @@ def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 
                         'id': item.get('id')
                     })
             except Exception as cal_err:
-                # Skip calendars with restricted permissions without failing the whole lookup
                 print(f"[Calendar Read Skip] Could not read {cal_name}: {cal_err}")
                 continue
 
         if not all_events:
-            return "No upcoming events found on any connected calendar (including Canvas feeds)."
+            return "No upcoming events found on connected calendars."
 
-        # 3. Sort all events chronologically across calendars
         all_events.sort(key=lambda x: x['start'] if x['start'] else "")
 
         result = []
@@ -248,7 +272,26 @@ def delete_calendar_event(event_id: str) -> str:
     except Exception as err:
         return f"Error deleting event: {str(err)}"
 
+# ==============================================================================
+# Tool Declarations & Dispatch
+# ==============================================================================
+
 tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "save_fact_tool",
+            "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory (e.g., user's name, favorite algorithm, schedule preferences).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact": {"type": "string", "description": "The exact factual information or preference to remember permanently."},
+                    "category": {"type": "string", "description": "Optional category (e.g. 'identity', 'preference', 'project')."}
+                },
+                "required": ["fact"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -314,6 +357,7 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "save_fact_tool": save_fact_tool,
     "list_calendar_events": list_calendar_events,
     "create_calendar_event": create_calendar_event,
     "update_calendar_event": update_calendar_event,
@@ -339,6 +383,10 @@ def health_check():
 @app.get("/history/{session_id}")
 def get_session_history(session_id: str, token: str = Depends(verify_token)):
     return {"history": get_history(session_id, limit=30)}
+
+@app.get("/memories")
+def get_all_memories(token: str = Depends(verify_token)):
+    return {"memories": list_facts()}
 
 @app.post("/transcribe")
 @app.post("/transcribe/")
@@ -379,29 +427,31 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
-    # 1. Fetch persistent history from SQLite
+    # 1. Fetch persistent long-term memories
+    facts = list_facts()
+    facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
+
+    # 2. Fetch session history
     history_records = get_history(session_id, limit=20)
     
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are ARGUS, an efficient personal AI executive assistant. "
-                "You are connected to an SQLite backend database that provides conversation memory for this active session. "
-                "You have live access to Google Calendar via tool functions: list_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event. "
-                "The list_calendar_events tool queries all connected calendars including Canvas feeds and academic schedules. "
-                "When the user asks about upcoming classes, assignments, schedules, or events, always invoke list_calendar_events. "
-                "Never say you cannot remember things within the session; use the conversation history provided. "
-                "Keep responses professional, direct, and concise."
-            )
-        }
-    ]
+    system_prompt = (
+        "You are ARGUS, an efficient personal AI executive assistant.\n"
+        "You have access to persistent SQLite memory and Google Calendar tools.\n\n"
+        "PERMANENT USER FACTS STORED IN MEMORY:\n"
+        f"{facts_block}\n\n"
+        "RULES FOR MEMORY & CALENDAR:\n"
+        "1. Whenever the user shares a personal fact, preference, rule, identity detail (such as their name), or asks you to remember something permanently, call save_fact_tool.\n"
+        "2. Always utilize the PERMANENT USER FACTS listed above to answer questions about the user naturally.\n"
+        "3. When asked about upcoming events, classes, or assignments, call list_calendar_events.\n"
+        "4. Never say you cannot remember details across sessions if they are present in your PERMANENT USER FACTS or tool capabilities."
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
     
     for r in history_records:
         role_label = "user" if r["role"] == "user" else "assistant"
         messages.append({"role": role_label, "content": r["content"]})
 
-    # 2. Append current user prompt and persist to SQLite
     messages.append({"role": "user", "content": request.message})
     save_message(session_id, "user", request.message)
 
@@ -416,7 +466,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
         response_msg = response.choices[0].message
         
-        # Tool call execution loop
+        # Tool execution loop
         if response_msg.tool_calls:
             messages.append(response_msg)
             for tool_call in response_msg.tool_calls:
@@ -434,7 +484,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": str(fn_result)
                 })
 
-            # Final response after tool execution
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
@@ -448,6 +497,5 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         print(f"[ARGUS Groq Error] {repr(e)}")
         reply_text = f"ARGUS backend error: {str(e)}"
 
-    # 3. Save assistant reply to SQLite
     save_message(session_id, "assistant", reply_text)
     return ChatResponse(reply=reply_text, session_id=session_id)
