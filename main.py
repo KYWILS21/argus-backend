@@ -67,7 +67,7 @@ def verify_token(authorization: Optional[str] = Header(None)):
     return token
 
 # ==============================================================================
-# Database & Memory
+# Database & Conversation Memory
 # ==============================================================================
 
 def init_db():
@@ -110,7 +110,7 @@ def get_history(session_id: str, limit: int = 15) -> List[Dict[str, str]]:
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
 # ==============================================================================
-# Google Calendar Tools
+# Google Calendar Tools Suite
 # ==============================================================================
 
 def get_calendar_service():
@@ -206,7 +206,7 @@ calendar_tools = [
 ]
 
 # ==============================================================================
-# Pydantic Schemas
+# Pydantic Models
 # ==============================================================================
 
 class ChatRequest(BaseModel):
@@ -270,7 +270,7 @@ async def transcribe_audio(
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
-    # Retrieve previous history (excluding the current prompt)
+    # 1. Fetch persistent history from SQLite for memory
     history_records = get_history(session_id, limit=10)
     chat_history = []
     for r in history_records:
@@ -280,19 +280,19 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
             parts=[types.Part.from_text(text=r["content"])]
         ))
 
-    # Persist the current user prompt to SQLite
+    # 2. Record incoming user prompt into SQLite
     save_message(session_id, "user", request.message)
 
     system_instruction = (
         "You are ARGUS, an efficient personal AI executive assistant. "
-        "You have direct access to the user's primary Google Calendar via tool functions. "
+        "You have full access to the user's primary Google Calendar via tool functions. "
         "When the user asks about their schedule, meetings, or calendar events, call list_calendar_events. "
-        "When the user asks to schedule, change, or cancel events, use the appropriate calendar tool. "
-        "Keep responses direct, professional, and concise."
+        "When the user asks to schedule, change, or cancel events, call the corresponding calendar tool. "
+        "Maintain conversation context from previous turns. Keep responses direct, professional, and concise."
     )
 
     try:
-        # Initializing chat via client.chats.create enables Automatic Function Calling (AFC)
+        # 3. Create native AFC multi-turn chat session with persistent history + tools
         chat = client.chats.create(
             model="gemini-3.6-flash",
             history=chat_history,
@@ -306,8 +306,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         reply_text = response.text or "Action processed."
 
     except Exception as e:
-        print(f"[ARGUS Error] /chat failed: {repr(e)}")
-        reply_text = f"ARGUS backend error: {str(e)}"
+        print(f"[ARGUS /chat Error] {repr(e)}")
+        reply_text = f"ARGUS backend notice: {str(e)}"
 
+    # 4. Record assistant reply into SQLite
     save_message(session_id, "assistant", reply_text)
     return ChatResponse(reply=reply_text, session_id=session_id)
