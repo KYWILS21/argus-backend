@@ -217,7 +217,6 @@ def delete_calendar_event(event_id: str) -> str:
     except Exception as err:
         return f"Error deleting event: {str(err)}"
 
-# Standard tool definitions for Groq
 tools_schema = [
     {
         "type": "function",
@@ -370,9 +369,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     save_message(session_id, "user", request.message)
 
     try:
-        # First completion with tool calling using active model
+        # First completion using active replacement model openai/gpt-oss-20b
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=messages,
             tools=tools_schema,
             tool_choice="auto",
@@ -401,7 +400,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             # Second completion to summarize the tool result
             second_response = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="openai/gpt-oss-20b",
                 messages=messages,
                 temperature=0.7
             )
