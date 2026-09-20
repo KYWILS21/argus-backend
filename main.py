@@ -440,19 +440,33 @@ async def transcribe_audio(
 
     try:
         audio_bytes = await file.read()
-        if not audio_bytes or len(audio_bytes) < 100:
+        # Increased minimum payload to avoid empty/silent blobs
+        if not audio_bytes or len(audio_bytes) < 4000:
             raise HTTPException(
                 status_code=400,
-                detail=f"Audio payload too small ({len(audio_bytes) if audio_bytes else 0} bytes)."
+                detail=f"Audio sample too short or empty ({len(audio_bytes) if audio_bytes else 0} bytes)."
             )
 
-        filename = file.filename or "recording.m4a"
+        filename = file.filename or "recording.webm"
+        
+        # Explicit transcription prompt suppresses hallucinated "you" / "thank you"
         transcription = groq_client.audio.transcriptions.create(
             file=(filename, audio_bytes),
             model="whisper-large-v3",
-            response_format="text"
+            prompt="Voice command directed to personal AI assistant ARGUS.",
+            response_format="text",
+            temperature=0.0
         )
-        return {"text": str(transcription).strip()}
+        
+        text = str(transcription).strip()
+        cleaned_lower = text.lower().rstrip(".!?, ")
+
+        # Filter out common Whisper silent-hallucination phrases
+        hallucination_blacklist = {"you", "thank you", "thanks", "subtitles by", "thank you for watching", "bye"}
+        if cleaned_lower in hallucination_blacklist or len(cleaned_lower) <= 1:
+            return {"text": ""}
+
+        return {"text": text}
 
     except HTTPException:
         raise
@@ -506,7 +520,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         response_msg = response.choices[0].message
         
         if response_msg.tool_calls:
-            # Store the tool call message
             messages.append({
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -540,7 +553,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": last_tool_output
                 })
 
-            # Follow-up request to synthesize the result
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
@@ -549,7 +561,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
             )
             
             content_output = second_response.choices[0].message.content
-            # Fallback to the raw tool text if the model outputs nothing
             reply_text = content_output if (content_output and content_output.strip()) else last_tool_output
         else:
             reply_text = response_msg.content or "No response generated."
