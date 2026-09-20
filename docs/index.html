@@ -36,7 +36,6 @@
       overflow: hidden;
     }
 
-    /* Top HUD Navigation Bar */
     header {
       padding: 16px 24px;
       display: flex;
@@ -76,7 +75,6 @@
       box-shadow: 0 0 8px var(--cyan-glow);
     }
 
-    /* Main Command Workspace */
     main {
       flex: 1;
       display: grid;
@@ -86,7 +84,6 @@
       min-height: 0;
     }
 
-    /* Left Column: Arc Core Visualizer */
     .left-hud {
       display: flex;
       flex-direction: column;
@@ -159,7 +156,6 @@
       text-align: center;
     }
 
-    /* Right Column: Terminal Transcript */
     .terminal-container {
       display: flex;
       flex-direction: column;
@@ -212,7 +208,6 @@
       word-break: break-word;
     }
 
-    /* Input Dock */
     .input-dock {
       padding: 16px;
       border-top: 1px solid var(--cyan-dim);
@@ -263,7 +258,6 @@
       box-shadow: 0 0 14px var(--alert-amber);
     }
 
-    /* Responsive adjustments */
     @media (max-width: 850px) {
       main {
         grid-template-columns: 1fr;
@@ -291,7 +285,6 @@
   </header>
 
   <main>
-    <!-- Core Visualizer Panel -->
     <div class="left-hud">
       <div id="reactor-box" class="arc-reactor-box" title="Click core to toggle audio transmission">
         <div class="outer-ring"></div>
@@ -301,7 +294,6 @@
       <div id="voice-label" class="core-label">CLICK CORE OR [MIC] TO TRANSMIT</div>
     </div>
 
-    <!-- Terminal Transcript Panel -->
     <div class="terminal-container">
       <div id="terminal-logs" class="terminal-logs">
         <div class="log-line">
@@ -320,16 +312,16 @@
 
   <script>
     document.addEventListener("DOMContentLoaded", () => {
-      // Configuration & credentials
       const API_BASE = "https://argus-backend-production-e7bd.up.railway.app";
-      const AUTH_BEARER = "default_secret_token"; // Ensure this matches your ARGUS_BEARER_TOKEN
+      
+      // INSERT YOUR ACTUAL ARGUS_BEARER_TOKEN FROM RAILWAY HERE:
+      const AUTH_BEARER = "default_secret_token";
 
       let mediaRecorder = null;
       let audioChunks = [];
       let isRecording = false;
       let activeStream = null;
 
-      // DOM Elements
       const terminal = document.getElementById("terminal-logs");
       const promptInput = document.getElementById("prompt-input");
       const execBtn = document.getElementById("exec-btn");
@@ -338,7 +330,6 @@
       const voiceLabel = document.getElementById("voice-label");
       const statusTools = document.getElementById("status-tools");
 
-      // Session ID initialization & persistence
       let sessionId = localStorage.getItem("argus_session_id");
       if (!sessionId) {
         sessionId = crypto.randomUUID();
@@ -383,11 +374,15 @@
             body: JSON.stringify({ message: message, session_id: sessionId })
           });
 
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!res.ok) {
+            const errorPayload = await res.json().catch(() => ({}));
+            throw new Error(errorPayload.detail || `HTTP ${res.status}`);
+          }
+
           const data = await res.json();
           appendLog("ARGUS", data.reply);
         } catch (err) {
-          appendLog("ERROR", `Failed to route directive: ${err.message}`, "error");
+          appendLog("ERROR", `Directive failed: ${err.message}`, "error");
         } finally {
           if (statusTools) {
             statusTools.textContent = "SYSTEM IDLE";
@@ -397,25 +392,28 @@
       }
 
       async function toggleVoiceRecording() {
-        console.log("[ARGUS] Mic action invoked. isRecording state:", isRecording);
-
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          appendLog("ERROR", "Microphone access requires HTTPS or localhost context.", "error");
+          appendLog("ERROR", "Microphone API unavailable. Page must be served over HTTPS.", "error");
           return;
         }
 
         if (!isRecording) {
           try {
-            appendLog("SYSTEM", "Requesting microphone stream...", "system");
-            activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
-            // Choose optimal supported mimeType
-            let mimeType = "audio/webm";
-            if (!MediaRecorder.isTypeSupported("audio/webm")) {
-              if (MediaRecorder.isTypeSupported("audio/mp4")) {
+            activeStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 44100
+              }
+            });
+
+            let mimeType = "audio/webm;codecs=opus";
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+              if (MediaRecorder.isTypeSupported("audio/webm")) {
+                mimeType = "audio/webm";
+              } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
                 mimeType = "audio/mp4";
-              } else if (MediaRecorder.isTypeSupported("audio/ogg")) {
-                mimeType = "audio/ogg";
               } else {
                 mimeType = "";
               }
@@ -431,7 +429,6 @@
             };
 
             mediaRecorder.onstop = async () => {
-              // Immediately release microphone hardware
               if (activeStream) {
                 activeStream.getTracks().forEach(t => t.stop());
                 activeStream = null;
@@ -440,8 +437,8 @@
               const actualType = mediaRecorder.mimeType || "audio/webm";
               const audioBlob = new Blob(audioChunks, { type: actualType });
 
-              if (audioBlob.size < 100) {
-                appendLog("SYSTEM", "Audio payload insufficient. Please speak and try again.", "system");
+              if (audioBlob.size < 4000) {
+                appendLog("SYSTEM", "Audio sample too short or silent. Please speak and try again.", "system");
                 if (voiceLabel) voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
                 return;
               }
@@ -451,7 +448,7 @@
 
               const ext = actualType.includes("mp4") ? "m4a" : "webm";
               const formData = new FormData();
-              formData.append("file", audioBlob, `recording.${ext}`);
+              formData.append("file", audioBlob, `speech.${ext}`);
 
               try {
                 const res = await fetch(`${API_BASE}/transcribe`, {
@@ -469,32 +466,35 @@
                 if (data.text && data.text.trim()) {
                   sendDirective(data.text);
                 } else {
-                  appendLog("SYSTEM", "No clear speech detected in input.", "system");
+                  appendLog("SYSTEM", "No clear speech detected. Speak closer to the microphone.", "system");
                 }
               } catch (err) {
-                appendLog("ERROR", `Audio pipe transcription error: ${err.message}`, "error");
+                appendLog("ERROR", `Transcription failed: ${err.message}`, "error");
               } finally {
                 if (voiceLabel) voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
                 if (statusTools) statusTools.textContent = "SYSTEM IDLE";
               }
             };
 
-            // Request buffer slices every 250ms
-            mediaRecorder.start(250);
+            mediaRecorder.start(200);
             isRecording = true;
             if (reactorBox) reactorBox.classList.add("recording");
             if (micBtn) micBtn.classList.add("active");
-            if (voiceLabel) voiceLabel.textContent = "LISTENING... CLICK TO TRANSMIT";
+            if (voiceLabel) voiceLabel.textContent = "RECORDING... CLICK WHEN FINISHED SPEAKING";
             appendLog("SYSTEM", "Listening to audio input...", "system");
 
           } catch (err) {
-            console.error("[ARGUS] Media stream error:", err);
             appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
             if (voiceLabel) voiceLabel.textContent = "MIC ACCESS ERROR";
           }
         } else {
           if (mediaRecorder && mediaRecorder.state !== "inactive") {
-            mediaRecorder.stop();
+            mediaRecorder.requestData();
+            setTimeout(() => {
+              if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+              }
+            }, 300);
           }
           isRecording = false;
           if (reactorBox) reactorBox.classList.remove("recording");
@@ -502,7 +502,6 @@
         }
       }
 
-      // Bind events
       if (execBtn) {
         execBtn.addEventListener("click", () => sendDirective(promptInput ? promptInput.value : ""));
       }
