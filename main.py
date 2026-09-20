@@ -7,7 +7,12 @@ from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
-from duckduckgo_search import DDGS
+
+# Support both new ddgs package and legacy duckduckgo_search
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 
 # Optional Google Calendar dependencies
 try:
@@ -126,7 +131,7 @@ def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
     )
     conn.commit()
     conn.close()
-    return f"Successfully committed to permanent memory: '{fact}'"
+    return f"Successfully saved to permanent memory: '{fact}'"
 
 def list_facts() -> List[str]:
     """Retrieves all saved long-term memories."""
@@ -142,22 +147,22 @@ def list_facts() -> List[str]:
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
-    """Queries DuckDuckGo for live internet information, weather, news, or external documentation."""
+    """Queries for live web results, forecasts, news, or articles."""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
             if not results:
-                return f"No live search results found for query: '{query}'"
+                return f"No results found for search query: '{query}'"
             
             output = []
             for r in results:
                 title = r.get("title", "Untitled")
-                body = r.get("body", "No description provided.")
+                body = r.get("body", "No description.")
                 href = r.get("href", "")
-                output.append(f"• {title}\n  Summary: {body}\n  Source: {href}")
+                output.append(f"Title: {title}\nSnippet: {body}\nURL: {href}")
             return "\n\n".join(output)
     except Exception as e:
-        return f"Web search execution error: {str(e)}"
+        return f"Web search error: {str(e)}"
 
 # ==============================================================================
 # Google Calendar Tools Suite (Multi-Calendar & Canvas Support)
@@ -302,11 +307,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "web_search_tool",
-            "description": "Search the live web for current weather conditions, forecasts, news, sports scores, or real-time info. ALWAYS call this when asked about the weather.",
+            "description": "Search the live web for current weather, news, facts, documentation, or real-time info.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query (e.g., 'weather in Philadelphia PA today')."}
+                    "query": {"type": "string", "description": "The search query."}
                 },
                 "required": ["query"]
             }
@@ -469,15 +474,15 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     history_records = get_history(session_id, limit=20)
     
     system_prompt = (
-        "You are ARGUS, an advanced AI executive assistant with live tool capabilities.\n"
-        "You have direct access to: Web Search (web_search_tool), Google Calendar (list_calendar_events, create_calendar_event, etc.), and persistent memory.\n\n"
+        "You are ARGUS, an advanced AI executive assistant with live tool access.\n"
+        "You have direct access to: Web Search (web_search_tool), Google Calendar (list_calendar_events, etc.), and persistent memory.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
-        "MANDATORY TOOL INSTRUCTIONS:\n"
-        "1. Real-time / Weather / News: You DO have access to live data via web_search_tool. NEVER claim you cannot access live data, real-time information, or the weather. ALWAYS invoke web_search_tool when the user asks about the weather, current news, sports, or live info.\n"
-        "2. Long-Term Facts: Call save_fact_tool whenever the user tells you their name, preferences, or details to store.\n"
-        "3. Calendar: Call list_calendar_events when asked about schedules, classes, Canvas events, or meetings.\n"
-        "4. Be direct, helpful, and concise."
+        "MANDATORY INSTRUCTIONS:\n"
+        "1. Live Info & Weather: You DO have live internet access via web_search_tool. Always call web_search_tool when asked about weather, current events, or web lookups.\n"
+        "2. Answering Tool Calls: Once a tool returns data, explain and synthesize that data directly into a conversational, direct response for the user.\n"
+        "3. Long-Term Facts: Call save_fact_tool whenever the user states personal facts or preferences.\n"
+        "4. Keep responses professional, helpful, and concise."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -501,6 +506,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         response_msg = response.choices[0].message
         
         if response_msg.tool_calls:
+            # Store the tool call message
             messages.append({
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -517,6 +523,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 ]
             })
 
+            last_tool_output = ""
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
@@ -526,21 +533,26 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 else:
                     fn_result = f"Error: Function {fn_name} not found."
 
+                last_tool_output = str(fn_result)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": str(fn_result)
+                    "content": last_tool_output
                 })
 
+            # Follow-up request to synthesize the result
             second_response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=messages,
                 tools=tools_schema,
                 temperature=0.5
             )
-            reply_text = second_response.choices[0].message.content or "Action processed."
+            
+            content_output = second_response.choices[0].message.content
+            # Fallback to the raw tool text if the model outputs nothing
+            reply_text = content_output if (content_output and content_output.strip()) else last_tool_output
         else:
-            reply_text = response_msg.content or "Action processed."
+            reply_text = response_msg.content or "No response generated."
 
     except Exception as e:
         print(f"[ARGUS Groq Error] {repr(e)}")
