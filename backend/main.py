@@ -69,8 +69,9 @@ def verify_token(authorization: Optional[str] = Header(None)):
             detail="Invalid Authorization header format. Expected 'Bearer <token>'."
         )
     
-    token = parts[1].strip()
-    expected_token = ARGUS_BEARER_TOKEN.strip()
+    # Strip whitespace and accidental surrounding quotes
+    token = parts[1].strip().strip('"').strip("'")
+    expected_token = ARGUS_BEARER_TOKEN.strip().strip('"').strip("'")
 
     if token != expected_token:
         print(f"[AUTH ERROR] Token mismatch! Received length: {len(token)}, Expected length: {len(expected_token)}")
