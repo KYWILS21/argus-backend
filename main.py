@@ -3,7 +3,7 @@ import json
 import sqlite3
 import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
@@ -48,23 +48,32 @@ app.add_middleware(
 async def preflight_handler(full_path: str):
     return {"status": "ok"}
 
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
+
 # ==============================================================================
 # Security / Auth
 # ==============================================================================
 
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization:
+        print("[AUTH ERROR] Missing Authorization header.")
         raise HTTPException(status_code=401, detail="Authorization header missing.")
     
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
+        print(f"[AUTH ERROR] Malformed header: '{authorization}'")
         raise HTTPException(
             status_code=401, 
             detail="Invalid Authorization header format. Expected 'Bearer <token>'."
         )
     
-    token = parts[1]
-    if token != ARGUS_BEARER_TOKEN:
+    token = parts[1].strip()
+    expected_token = ARGUS_BEARER_TOKEN.strip()
+
+    if token != expected_token:
+        print(f"[AUTH ERROR] Token mismatch! Received length: {len(token)}, Expected length: {len(expected_token)}")
         raise HTTPException(status_code=403, detail="Invalid or unauthorized token.")
     
     return token
@@ -121,7 +130,6 @@ def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
 def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
-    """Saves a permanent fact or user detail into long-term memory."""
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -134,7 +142,6 @@ def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
     return f"Successfully saved to permanent memory: '{fact}'"
 
 def list_facts() -> List[str]:
-    """Retrieves all saved long-term memories."""
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute("SELECT fact FROM user_memories ORDER BY id ASC")
@@ -147,7 +154,6 @@ def list_facts() -> List[str]:
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
-    """Queries for live web results, forecasts, news, or articles."""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -440,7 +446,6 @@ async def transcribe_audio(
 
     try:
         audio_bytes = await file.read()
-        # Increased minimum payload to avoid empty/silent blobs
         if not audio_bytes or len(audio_bytes) < 4000:
             raise HTTPException(
                 status_code=400,
@@ -449,7 +454,6 @@ async def transcribe_audio(
 
         filename = file.filename or "recording.webm"
         
-        # Explicit transcription prompt suppresses hallucinated "you" / "thank you"
         transcription = groq_client.audio.transcriptions.create(
             file=(filename, audio_bytes),
             model="whisper-large-v3",
@@ -461,7 +465,6 @@ async def transcribe_audio(
         text = str(transcription).strip()
         cleaned_lower = text.lower().rstrip(".!?, ")
 
-        # Filter out common Whisper silent-hallucination phrases
         hallucination_blacklist = {"you", "thank you", "thanks", "subtitles by", "thank you for watching", "bye"}
         if cleaned_lower in hallucination_blacklist or len(cleaned_lower) <= 1:
             return {"text": ""}

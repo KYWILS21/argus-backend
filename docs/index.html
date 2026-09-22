@@ -67,6 +67,7 @@
       background: rgba(0, 240, 255, 0.05);
       letter-spacing: 1px;
       transition: all 0.2s ease;
+      cursor: pointer;
     }
 
     .status-tag.active {
@@ -279,7 +280,7 @@
   <header>
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
-      <div id="status-net" class="status-tag active">ONLINE</div>
+      <div id="status-key" class="status-tag" title="Click to update token">SET AUTH TOKEN</div>
       <div id="status-tools" class="status-tag">SYSTEM IDLE</div>
     </div>
   </header>
@@ -314,8 +315,8 @@
     document.addEventListener("DOMContentLoaded", () => {
       const API_BASE = "https://argus-backend-production-e7bd.up.railway.app";
       
-      // INSERT YOUR ACTUAL ARGUS_BEARER_TOKEN FROM RAILWAY HERE:
-      const AUTH_BEARER = "default_secret_token";
+      // Load saved token from browser storage or default to Railway fallback
+      let authToken = localStorage.getItem("argus_auth_bearer") || "default_secret_token";
 
       let mediaRecorder = null;
       let audioChunks = [];
@@ -329,6 +330,24 @@
       const reactorBox = document.getElementById("reactor-box");
       const voiceLabel = document.getElementById("voice-label");
       const statusTools = document.getElementById("status-tools");
+      const statusKey = document.getElementById("status-key");
+
+      // Check key state
+      if (authToken !== "default_secret_token") {
+        statusKey.textContent = "AUTH LOADED";
+        statusKey.classList.add("active");
+      }
+
+      statusKey.addEventListener("click", () => {
+        const inputKey = prompt("Enter your ARGUS_BEARER_TOKEN value from Railway:", authToken);
+        if (inputKey !== null && inputKey.trim()) {
+          authToken = inputKey.trim();
+          localStorage.setItem("argus_auth_bearer", authToken);
+          statusKey.textContent = "AUTH LOADED";
+          statusKey.classList.add("active");
+          appendLog("SYSTEM", "Auth token updated successfully.", "system");
+        }
+      });
 
       let sessionId = localStorage.getItem("argus_session_id");
       if (!sessionId) {
@@ -369,10 +388,14 @@
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${AUTH_BEARER}`
+              "Authorization": `Bearer ${authToken.trim()}`
             },
             body: JSON.stringify({ message: message, session_id: sessionId })
           });
+
+          if (res.status === 403) {
+            throw new Error("403 Forbidden: Token does not match ARGUS_BEARER_TOKEN in Railway. Click [SET AUTH TOKEN] in the top bar to set it.");
+          }
 
           if (!res.ok) {
             const errorPayload = await res.json().catch(() => ({}));
@@ -451,11 +474,16 @@
               formData.append("file", audioBlob, `speech.${ext}`);
 
               try {
+                // Call /transcribe with trailing slash fallback support
                 const res = await fetch(`${API_BASE}/transcribe`, {
                   method: "POST",
-                  headers: { "Authorization": `Bearer ${AUTH_BEARER}` },
+                  headers: { "Authorization": `Bearer ${authToken.trim()}` },
                   body: formData
                 });
+
+                if (res.status === 403) {
+                  throw new Error("403 Forbidden: Bearer token rejected by backend. Click [SET AUTH TOKEN] in header.");
+                }
 
                 if (!res.ok) {
                   const errorPayload = await res.json().catch(() => ({}));
@@ -481,7 +509,7 @@
             if (reactorBox) reactorBox.classList.add("recording");
             if (micBtn) micBtn.classList.add("active");
             if (voiceLabel) voiceLabel.textContent = "RECORDING... CLICK WHEN FINISHED SPEAKING";
-            appendLog("SYSTEM", "Listening to audio input...", "system");
+            appendLog("SYSTEM", "Recording speech...", "system");
 
           } catch (err) {
             appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
