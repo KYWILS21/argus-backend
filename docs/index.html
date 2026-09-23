@@ -87,35 +87,40 @@
     main {
       flex: 1;
       display: grid;
-      grid-template-columns: 380px 1fr;
+      grid-template-columns: 400px 1fr;
       gap: 20px;
       padding: 20px;
       min-height: 0;
       z-index: 1;
     }
 
+    /* Core Voice Hub Panel */
     .left-hud {
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: space-between;
+      justify-content: space-around;
       background: var(--panel-bg);
       border: 1px solid var(--cyan-dim);
       border-radius: 6px;
-      padding: 24px;
+      padding: 30px 24px;
       position: relative;
       box-shadow: inset 0 0 15px rgba(0, 240, 255, 0.05);
     }
 
     .arc-reactor-box {
-      width: 190px;
-      height: 190px;
+      width: 220px;
+      height: 220px;
       position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      margin-top: 10px;
+      transition: transform 0.2s ease;
+    }
+
+    .arc-reactor-box:hover {
+      transform: scale(1.03);
     }
 
     .outer-ring {
@@ -140,8 +145,8 @@
     }
 
     .reactor-core {
-      width: 50%;
-      height: 50%;
+      width: 52%;
+      height: 52%;
       background: radial-gradient(circle, #fff 0%, var(--cyan-primary) 60%, transparent 100%);
       border-radius: 50%;
       box-shadow: 0 0 25px var(--cyan-primary);
@@ -150,13 +155,13 @@
 
     .arc-reactor-box.recording .reactor-core {
       background: radial-gradient(circle, #fff 0%, var(--alert-amber) 60%, transparent 100%);
-      box-shadow: 0 0 35px var(--alert-amber);
+      box-shadow: 0 0 40px var(--alert-amber);
       transform: scale(1.15);
     }
 
     .arc-reactor-box.recording .inner-ring {
       border-color: var(--alert-amber);
-      box-shadow: 0 0 16px var(--alert-amber);
+      box-shadow: 0 0 18px var(--alert-amber);
       animation-duration: 3s;
     }
 
@@ -176,12 +181,12 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 8px;
+      gap: 12px;
     }
 
     #visualizer-canvas {
       width: 100%;
-      height: 90px;
+      height: 85px;
       background: rgba(0, 15, 30, 0.6);
       border: 1px solid var(--cyan-dim);
       border-radius: 4px;
@@ -193,8 +198,10 @@
       letter-spacing: 2px;
       opacity: 0.85;
       text-align: center;
+      font-weight: bold;
     }
 
+    /* Terminal Transcript Container */
     .terminal-container {
       display: flex;
       flex-direction: column;
@@ -206,10 +213,61 @@
       box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5);
     }
 
+    /* Optional Slide-down Command Prompt */
+    .optional-prompt-dock {
+      display: none;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--cyan-dim);
+      background: rgba(4, 14, 28, 0.95);
+      gap: 12px;
+      align-items: center;
+      animation: fadeInDock 0.25s ease-out;
+    }
+
+    .optional-prompt-dock.visible {
+      display: flex;
+    }
+
+    .command-input {
+      flex: 1;
+      background: rgba(0, 240, 255, 0.05);
+      border: 1px solid var(--cyan-dim);
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 0.9rem;
+      border-radius: 4px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .command-input:focus {
+      border-color: var(--cyan-primary);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+    }
+
+    .hud-btn {
+      background: rgba(0, 240, 255, 0.1);
+      border: 1px solid var(--cyan-primary);
+      color: var(--cyan-primary);
+      padding: 9px 18px;
+      cursor: pointer;
+      font-weight: bold;
+      border-radius: 4px;
+      letter-spacing: 1px;
+      transition: all 0.2s;
+      font-size: 0.8rem;
+    }
+
+    .hud-btn:hover {
+      background: var(--cyan-primary);
+      color: #000;
+      box-shadow: 0 0 12px var(--cyan-glow);
+    }
+
     .terminal-logs {
       flex: 1;
       overflow-y: auto;
-      padding: 20px;
+      padding: 24px;
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -247,57 +305,7 @@
       word-break: break-word;
     }
 
-    .input-dock {
-      padding: 16px;
-      border-top: 1px solid var(--cyan-dim);
-      background: rgba(3, 10, 20, 0.9);
-      display: flex;
-      gap: 12px;
-    }
-
-    .command-input {
-      flex: 1;
-      background: rgba(0, 240, 255, 0.05);
-      border: 1px solid var(--cyan-dim);
-      padding: 12px 16px;
-      color: #fff;
-      font-size: 0.95rem;
-      border-radius: 4px;
-      outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
-    }
-
-    .command-input:focus {
-      border-color: var(--cyan-primary);
-      box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
-    }
-
-    .hud-btn {
-      background: rgba(0, 240, 255, 0.1);
-      border: 1px solid var(--cyan-primary);
-      color: var(--cyan-primary);
-      padding: 0 20px;
-      cursor: pointer;
-      font-weight: bold;
-      border-radius: 4px;
-      letter-spacing: 1px;
-      transition: all 0.2s;
-    }
-
-    .hud-btn:hover {
-      background: var(--cyan-primary);
-      color: #000;
-      box-shadow: 0 0 12px var(--cyan-glow);
-    }
-
-    .hud-btn.active {
-      background: var(--alert-amber);
-      border-color: var(--alert-amber);
-      color: #000;
-      box-shadow: 0 0 14px var(--alert-amber);
-    }
-
-    /* Slide-out Drawers */
+    /* Drawers */
     .hud-drawer {
       position: fixed;
       top: 0;
@@ -428,7 +436,7 @@
     @media (max-width: 850px) {
       main {
         grid-template-columns: 1fr;
-        grid-template-rows: 320px 1fr;
+        grid-template-rows: 350px 1fr;
       }
       .hud-drawer {
         width: 100vw;
@@ -448,6 +456,11 @@
       0% { transform: scale(0.92); opacity: 0.8; }
       100% { transform: scale(1.18); opacity: 1.0; }
     }
+
+    @keyframes fadeInDock {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
@@ -455,6 +468,7 @@
   <header>
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
+      <div id="btn-toggle-input" class="status-tag" title="Toggle optional keyboard input">KEYBOARD INPUT</div>
       <div id="btn-agenda" class="status-tag" title="View Canvas & Calendar Agenda">AGENDA // CANV</div>
       <div id="btn-memory" class="status-tag" title="Open Long-Term Memory Bank">MEMORY BANK</div>
       <div id="status-tts" class="status-tag active" title="Toggle audio voice playback">AUDIO: ON</div>
@@ -464,6 +478,7 @@
   </header>
 
   <main>
+    <!-- Voice-First Arc Core Hub -->
     <div class="left-hud">
       <div id="reactor-box" class="arc-reactor-box" title="Click core to toggle audio transmission">
         <div class="outer-ring"></div>
@@ -472,23 +487,23 @@
       </div>
 
       <div class="visualizer-container">
-        <canvas id="visualizer-canvas" width="340" height="90"></canvas>
-        <div id="voice-label" class="core-label">CLICK CORE OR [MIC] TO TRANSMIT</div>
+        <canvas id="visualizer-canvas" width="340" height="85"></canvas>
+        <div id="voice-label" class="core-label">CLICK ARC CORE TO TRANSMIT</div>
       </div>
     </div>
 
+    <!-- Terminal Transcript & Optional Input -->
     <div class="terminal-container">
+      <div id="optional-prompt-dock" class="optional-prompt-dock">
+        <input id="prompt-input" class="command-input" type="text" placeholder="Type directive here..." autocomplete="off">
+        <button id="exec-btn" class="hud-btn" type="button">SEND</button>
+      </div>
+
       <div id="terminal-logs" class="terminal-logs">
         <div class="log-line">
           <span class="log-sender">ARGUS</span>
-          <span class="log-content">System initialized. Memory, Calendar, and Web feeds synced. How may I assist you?</span>
+          <span class="log-content">System online. Core voice interface active. Click the Arc Reactor to transmit verbal directives.</span>
         </div>
-      </div>
-
-      <div class="input-dock">
-        <button id="mic-btn" class="hud-btn" type="button">MIC</button>
-        <input id="prompt-input" class="command-input" type="text" placeholder="Enter directive..." autocomplete="off">
-        <button id="exec-btn" class="hud-btn" type="button">EXECUTE</button>
       </div>
     </div>
   </main>
@@ -532,13 +547,15 @@
       const terminal = document.getElementById("terminal-logs");
       const promptInput = document.getElementById("prompt-input");
       const execBtn = document.getElementById("exec-btn");
-      const micBtn = document.getElementById("mic-btn");
       const reactorBox = document.getElementById("reactor-box");
       const voiceLabel = document.getElementById("voice-label");
       const statusTools = document.getElementById("status-tools");
       const statusKey = document.getElementById("status-key");
       const statusTts = document.getElementById("status-tts");
       
+      const btnToggleInput = document.getElementById("btn-toggle-input");
+      const optionalPromptDock = document.getElementById("optional-prompt-dock");
+
       const drawerOverlay = document.getElementById("drawer-overlay");
       const btnMemory = document.getElementById("btn-memory");
       const memoryDrawer = document.getElementById("memory-drawer");
@@ -554,7 +571,16 @@
       const canvasCtx = canvas.getContext("2d");
 
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
-      canvas.height = canvas.clientHeight * window.devicePixelRatio || 90;
+      canvas.height = canvas.clientHeight * window.devicePixelRatio || 85;
+
+      // Optional Keyboard Input Toggle
+      btnToggleInput.addEventListener("click", () => {
+        optionalPromptDock.classList.toggle("visible");
+        btnToggleInput.classList.toggle("active");
+        if (optionalPromptDock.classList.contains("visible")) {
+          promptInput.focus();
+        }
+      });
 
       function updateTtsUi() {
         statusTts.textContent = ttsEnabled ? "AUDIO: ON" : "AUDIO: MUTED";
@@ -603,7 +629,7 @@
       agendaClose.addEventListener("click", closeAllDrawers);
 
       // =========================================================
-      // Agenda Drawer Handling
+      // Agenda Drawer
       // =========================================================
       async function loadAgenda() {
         agendaList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Querying Canvas & Calendar feeds...</div>';
@@ -665,7 +691,7 @@
       });
 
       // =========================================================
-      // Memory Drawer Handling
+      // Memory Drawer
       // =========================================================
       async function loadMemories() {
         memoryList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Fetching records from SQLite...</div>';
@@ -878,12 +904,12 @@
 
         utterance.onend = () => {
           reactorBox.classList.remove("speaking");
-          voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
+          voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
         };
 
         utterance.onerror = () => {
           reactorBox.classList.remove("speaking");
-          voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
+          voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
         };
 
         window.speechSynthesis.speak(utterance);
@@ -939,7 +965,7 @@
         }
       }
 
-      // Voice Capture
+      // Voice Capture via Arc Reactor Click
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone API requires HTTPS context.", "error");
@@ -998,7 +1024,7 @@
 
               if (audioBlob.size < 4000) {
                 appendLog("SYSTEM", "Audio sample too short or silent. Please speak clearly.", "system");
-                if (voiceLabel) voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
+                if (voiceLabel) voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
                 return;
               }
 
@@ -1034,16 +1060,15 @@
               } catch (err) {
                 appendLog("ERROR", `Transcription failed: ${err.message}`, "error");
               } finally {
-                if (voiceLabel) voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
+                if (voiceLabel) voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
                 if (statusTools) statusTools.textContent = "SYSTEM IDLE";
               }
             };
 
             mediaRecorder.start(200);
             isRecording = true;
-            if (reactorBox) reactorBox.classList.add("recording");
-            if (micBtn) micBtn.classList.add("active");
-            if (voiceLabel) voiceLabel.textContent = "RECORDING... CLICK WHEN FINISHED SPEAKING";
+            reactorBox.classList.add("recording");
+            voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
             appendLog("SYSTEM", "Listening to audio input...", "system");
 
           } catch (err) {
@@ -1060,8 +1085,7 @@
             }, 300);
           }
           isRecording = false;
-          if (reactorBox) reactorBox.classList.remove("recording");
-          if (micBtn) micBtn.classList.remove("active");
+          reactorBox.classList.remove("recording");
         }
       }
 
@@ -1075,8 +1099,7 @@
         });
       }
 
-      if (micBtn) micBtn.addEventListener("click", toggleVoiceRecording);
-      if (reactorBox) reactorBox.addEventListener("click", toggleVoiceRecording);
+      reactorBox.addEventListener("click", toggleVoiceRecording);
     });
   </script>
 </body>
