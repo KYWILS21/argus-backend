@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.1.0")
+app = FastAPI(title="ARGUS API", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -188,7 +188,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         return f"Web search error: {str(e)}"
 
 # ==============================================================================
-# Google Calendar Suite
+# Google Calendar Suite (Multi-Calendar & Canvas)
 # ==============================================================================
 
 def get_calendar_service():
@@ -213,7 +213,7 @@ def get_calendar_service():
     elif GOOGLE_CALENDAR_TOKEN:
         try:
             creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
-        except Exception as e:
+        except Exception:
             return None
 
     if not creds_info:
@@ -225,10 +225,10 @@ def get_calendar_service():
     except Exception:
         return None
 
-def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
+def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
     service = get_calendar_service()
     if not service:
-        return "Google Calendar integration is not active or credentials are missing."
+        return []
 
     try:
         now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -261,19 +261,18 @@ def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 
             except Exception:
                 continue
 
-        if not all_events:
-            return "No upcoming events found on connected calendars."
-
         all_events.sort(key=lambda x: x['start'] if x['start'] else "")
+        return all_events[:max_results]
+    except Exception as e:
+        print(f"[Calendar Event Fetch Error] {e}")
+        return []
 
-        result = []
-        for e in all_events[:max_results]:
-            result.append(f"- [{e['calendar']}] {e['summary']} (Starts: {e['start']}, ID: {e['id']})")
-        
-        return "\n".join(result)
-
-    except Exception as err:
-        return f"Error fetching multi-calendar events: {str(err)}"
+def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
+    events = fetch_raw_calendar_events(time_min_iso, max_results)
+    if not events:
+        return "No upcoming events found on connected calendars or integration is inactive."
+    result = [f"- [{e['calendar']}] {e['summary']} (Starts: {e['start']}, ID: {e['id']})" for e in events]
+    return "\n".join(result)
 
 def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
     service = get_calendar_service()
@@ -445,18 +444,22 @@ def health_check():
 def get_session_history(session_id: str, token: str = Depends(verify_token)):
     return {"history": get_history(session_id, limit=30)}
 
-# Updated to return structured objects for the HUD drawer
 @app.get("/memories")
 def get_all_memories(token: str = Depends(verify_token)):
     return {"memories": get_all_memories_records()}
 
-# Direct deletion endpoint
 @app.delete("/memories/{memory_id}")
 def delete_memory(memory_id: int, token: str = Depends(verify_token)):
     success = delete_memory_by_id(memory_id)
     if not success:
         raise HTTPException(status_code=404, detail="Memory record not found.")
     return {"status": "deleted", "id": memory_id}
+
+# Dedicated structured agenda endpoint for HUD widgets
+@app.get("/agenda")
+def get_agenda(token: str = Depends(verify_token)):
+    events = fetch_raw_calendar_events(max_results=20)
+    return {"events": events}
 
 @app.post("/transcribe")
 @app.post("/transcribe/")
