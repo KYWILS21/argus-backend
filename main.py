@@ -33,7 +33,7 @@ DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.0.0")
+app = FastAPI(title="ARGUS API", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,29 +58,25 @@ async def favicon():
 
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization:
-        print("[AUTH ERROR] Missing Authorization header.")
         raise HTTPException(status_code=401, detail="Authorization header missing.")
     
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        print(f"[AUTH ERROR] Malformed header: '{authorization}'")
         raise HTTPException(
             status_code=401, 
             detail="Invalid Authorization header format. Expected 'Bearer <token>'."
         )
     
-    # Strip whitespace and accidental surrounding quotes
     token = parts[1].strip().strip('"').strip("'")
     expected_token = ARGUS_BEARER_TOKEN.strip().strip('"').strip("'")
 
     if token != expected_token:
-        print(f"[AUTH ERROR] Token mismatch! Received length: {len(token)}, Expected length: {len(expected_token)}")
         raise HTTPException(status_code=403, detail="Invalid or unauthorized token.")
     
     return token
 
 # ==============================================================================
-# Database & Conversation Memory (Short-Term + Long-Term)
+# Database & Memory Persistence
 # ==============================================================================
 
 def init_db():
@@ -150,6 +146,26 @@ def list_facts() -> List[str]:
     conn.close()
     return [r[0] for r in rows]
 
+def get_all_memories_records() -> List[Dict[str, Any]]:
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, fact, category, created_at FROM user_memories ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {"id": r[0], "fact": r[1], "category": r[2], "created_at": r[3]}
+        for r in rows
+    ]
+
+def delete_memory_by_id(memory_id: int) -> bool:
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_memories WHERE id = ?", (memory_id,))
+    affected = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
 # ==============================================================================
 # Live Web Search Tool
 # ==============================================================================
@@ -172,7 +188,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         return f"Web search error: {str(e)}"
 
 # ==============================================================================
-# Google Calendar Tools Suite (Multi-Calendar & Canvas Support)
+# Google Calendar Suite
 # ==============================================================================
 
 def get_calendar_service():
@@ -198,7 +214,6 @@ def get_calendar_service():
         try:
             creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
         except Exception as e:
-            print(f"[Calendar JSON Parse Error] {e}")
             return None
 
     if not creds_info:
@@ -207,8 +222,7 @@ def get_calendar_service():
     try:
         creds = Credentials.from_authorized_user_info(creds_info)
         return build("calendar", "v3", credentials=creds)
-    except Exception as e:
-        print(f"[Calendar Auth Error] {e}")
+    except Exception:
         return None
 
 def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
@@ -244,8 +258,7 @@ def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 
                         'start': start_val,
                         'id': item.get('id')
                     })
-            except Exception as cal_err:
-                print(f"[Calendar Read Skip] Could not read {cal_name}: {cal_err}")
+            except Exception:
                 continue
 
         if not all_events:
@@ -413,7 +426,7 @@ tool_dispatch = {
 }
 
 # ==============================================================================
-# Pydantic Models & Endpoints
+# Endpoints
 # ==============================================================================
 
 class ChatRequest(BaseModel):
@@ -432,9 +445,18 @@ def health_check():
 def get_session_history(session_id: str, token: str = Depends(verify_token)):
     return {"history": get_history(session_id, limit=30)}
 
+# Updated to return structured objects for the HUD drawer
 @app.get("/memories")
 def get_all_memories(token: str = Depends(verify_token)):
-    return {"memories": list_facts()}
+    return {"memories": get_all_memories_records()}
+
+# Direct deletion endpoint
+@app.delete("/memories/{memory_id}")
+def delete_memory(memory_id: int, token: str = Depends(verify_token)):
+    success = delete_memory_by_id(memory_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Memory record not found.")
+    return {"status": "deleted", "id": memory_id}
 
 @app.post("/transcribe")
 @app.post("/transcribe/")
@@ -475,7 +497,6 @@ async def transcribe_audio(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[ARGUS Transcribe Error] {repr(e)}")
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
 
 @app.post("/chat", response_model=ChatResponse)
@@ -570,7 +591,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
             reply_text = response_msg.content or "No response generated."
 
     except Exception as e:
-        print(f"[ARGUS Groq Error] {repr(e)}")
         reply_text = f"ARGUS backend error: {str(e)}"
 
     save_message(session_id, "assistant", reply_text)
