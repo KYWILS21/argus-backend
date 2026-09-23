@@ -34,6 +34,7 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      position: relative;
     }
 
     header {
@@ -45,6 +46,7 @@
       background: rgba(4, 12, 24, 0.85);
       backdrop-filter: blur(8px);
       box-shadow: 0 4px 20px rgba(0, 240, 255, 0.1);
+      z-index: 10;
     }
 
     .brand-title {
@@ -56,18 +58,24 @@
 
     .status-panel {
       display: flex;
-      gap: 16px;
+      gap: 12px;
       font-size: 0.8rem;
     }
 
     .status-tag {
-      padding: 4px 10px;
+      padding: 5px 12px;
       border: 1px solid var(--cyan-dim);
       border-radius: 3px;
       background: rgba(0, 240, 255, 0.05);
       letter-spacing: 1px;
       transition: all 0.2s ease;
       cursor: pointer;
+      user-select: none;
+    }
+
+    .status-tag:hover {
+      border-color: var(--cyan-primary);
+      box-shadow: 0 0 8px var(--cyan-glow);
     }
 
     .status-tag.active {
@@ -83,6 +91,7 @@
       gap: 20px;
       padding: 20px;
       min-height: 0;
+      z-index: 1;
     }
 
     .left-hud {
@@ -162,7 +171,6 @@
       box-shadow: 0 0 24px var(--cyan-glow);
     }
 
-    /* Waveform Canvas Area */
     .visualizer-container {
       width: 100%;
       display: flex;
@@ -289,10 +297,140 @@
       box-shadow: 0 0 14px var(--alert-amber);
     }
 
+    /* ========================================================= */
+    /* Slide-out Memory Bank Drawer                              */
+    /* ========================================================= */
+    .memory-drawer {
+      position: fixed;
+      top: 0;
+      right: -420px;
+      width: 400px;
+      height: 100vh;
+      background: rgba(5, 14, 26, 0.95);
+      backdrop-filter: blur(12px);
+      border-left: 1px solid var(--cyan-primary);
+      box-shadow: -10px 0 30px rgba(0, 240, 255, 0.15);
+      transition: right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .memory-drawer.open {
+      right: 0;
+    }
+
+    .drawer-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--cyan-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .drawer-title {
+      font-size: 1.1rem;
+      letter-spacing: 2px;
+      font-weight: bold;
+    }
+
+    .drawer-close {
+      background: none;
+      border: 1px solid var(--cyan-dim);
+      color: var(--cyan-primary);
+      padding: 4px 8px;
+      cursor: pointer;
+      border-radius: 3px;
+    }
+
+    .drawer-close:hover {
+      border-color: var(--alert-red);
+      color: var(--alert-red);
+    }
+
+    .memory-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .memory-card {
+      background: rgba(0, 240, 255, 0.04);
+      border: 1px solid var(--cyan-dim);
+      border-radius: 4px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: border-color 0.2s;
+    }
+
+    .memory-card:hover {
+      border-color: var(--cyan-primary);
+    }
+
+    .memory-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      opacity: 0.7;
+    }
+
+    .memory-category {
+      color: var(--alert-amber);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .memory-fact {
+      font-size: 0.85rem;
+      color: #e0f7fa;
+      line-height: 1.4;
+    }
+
+    .memory-del-btn {
+      align-self: flex-end;
+      background: rgba(255, 77, 77, 0.1);
+      border: 1px solid rgba(255, 77, 77, 0.4);
+      color: var(--alert-red);
+      font-size: 0.7rem;
+      padding: 3px 8px;
+      cursor: pointer;
+      border-radius: 3px;
+      letter-spacing: 1px;
+    }
+
+    .memory-del-btn:hover {
+      background: var(--alert-red);
+      color: #000;
+    }
+
+    .drawer-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+      z-index: 99;
+    }
+
+    .drawer-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
     @media (max-width: 850px) {
       main {
         grid-template-columns: 1fr;
         grid-template-rows: 320px 1fr;
+      }
+      .memory-drawer {
+        width: 100vw;
+        right: -100vw;
       }
     }
 
@@ -315,6 +453,7 @@
   <header>
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
+      <div id="btn-memory" class="status-tag" title="Open Long-Term Memory Bank">MEMORY BANK</div>
       <div id="status-tts" class="status-tag active" title="Toggle audio voice playback">AUDIO: ON</div>
       <div id="status-key" class="status-tag" title="Click to update token">SET AUTH TOKEN</div>
       <div id="status-tools" class="status-tag">SYSTEM IDLE</div>
@@ -351,6 +490,18 @@
     </div>
   </main>
 
+  <!-- Slide-out Drawer Component -->
+  <div id="drawer-overlay" class="drawer-overlay"></div>
+  <aside id="memory-drawer" class="memory-drawer">
+    <div class="drawer-header">
+      <div class="drawer-title">PERMANENT MEMORY BANK</div>
+      <button id="drawer-close" class="drawer-close">[CLOSE]</button>
+    </div>
+    <div id="memory-list" class="memory-list">
+      <div class="log-line"><span class="log-content">Loading stored memories...</span></div>
+    </div>
+  </aside>
+
   <script>
     document.addEventListener("DOMContentLoaded", () => {
       const API_BASE = "https://argus-backend-production-e7bd.up.railway.app";
@@ -362,7 +513,6 @@
       let isRecording = false;
       let activeStream = null;
 
-      // Web Audio API State
       let audioCtx = null;
       let analyser = null;
       let audioSource = null;
@@ -377,10 +527,15 @@
       const statusTools = document.getElementById("status-tools");
       const statusKey = document.getElementById("status-key");
       const statusTts = document.getElementById("status-tts");
+      const btnMemory = document.getElementById("btn-memory");
+      const memoryDrawer = document.getElementById("memory-drawer");
+      const drawerOverlay = document.getElementById("drawer-overlay");
+      const drawerClose = document.getElementById("drawer-close");
+      const memoryList = document.getElementById("memory-list");
+
       const canvas = document.getElementById("visualizer-canvas");
       const canvasCtx = canvas.getContext("2d");
 
-      // Set canvas render resolution to prevent blurring
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
       canvas.height = canvas.clientHeight * window.devicePixelRatio || 90;
 
@@ -420,6 +575,97 @@
         }
       });
 
+      // =========================================================
+      // Memory Drawer Logic
+      // =========================================================
+      async function loadMemories() {
+        memoryList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Fetching records from SQLite...</div>';
+        try {
+          const res = await fetch(`${API_BASE}/memories`, {
+            headers: { "Authorization": `Bearer ${authToken.trim()}` }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          renderMemoryCards(data.memories || []);
+        } catch (err) {
+          memoryList.innerHTML = `<div style="color:var(--alert-red); font-size:0.85rem;">Failed to load memories: ${err.message}</div>`;
+        }
+      }
+
+      function renderMemoryCards(memories) {
+        if (!memories.length) {
+          memoryList.innerHTML = '<div style="font-size:0.85rem; opacity:0.7;">No memories stored in the bank yet.</div>';
+          return;
+        }
+
+        memoryList.innerHTML = "";
+        memories.forEach(m => {
+          const card = document.createElement("div");
+          card.className = "memory-card";
+
+          const meta = document.createElement("div");
+          meta.className = "memory-meta";
+
+          const cat = document.createElement("span");
+          cat.className = "memory-category";
+          cat.textContent = m.category || "GENERAL";
+
+          const date = document.createElement("span");
+          date.textContent = m.created_at ? m.created_at.slice(0, 10) : "";
+
+          meta.appendChild(cat);
+          meta.appendChild(date);
+
+          const fact = document.createElement("div");
+          fact.className = "memory-fact";
+          fact.textContent = m.fact;
+
+          const delBtn = document.createElement("button");
+          delBtn.className = "memory-del-btn";
+          delBtn.textContent = "PURGE";
+          delBtn.addEventListener("click", async () => {
+            if (confirm(`Purge this memory?\n"${m.fact}"`)) {
+              await deleteMemory(m.id, card);
+            }
+          });
+
+          card.appendChild(meta);
+          card.appendChild(fact);
+          card.appendChild(delBtn);
+          memoryList.appendChild(card);
+        });
+      }
+
+      async function deleteMemory(id, cardElement) {
+        try {
+          const res = await fetch(`${API_BASE}/memories/${id}`, {
+            method: "DELETE",
+            headers: { "Authorization": `Bearer ${authToken.trim()}` }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          cardElement.remove();
+          appendLog("SYSTEM", `Memory #${id} purged from permanent storage.`, "system");
+        } catch (err) {
+          alert(`Failed to delete record: ${err.message}`);
+        }
+      }
+
+      function openDrawer() {
+        memoryDrawer.classList.add("open");
+        drawerOverlay.classList.add("open");
+        loadMemories();
+      }
+
+      function closeDrawer() {
+        memoryDrawer.classList.remove("open");
+        drawerOverlay.classList.remove("open");
+      }
+
+      btnMemory.addEventListener("click", openDrawer);
+      drawerClose.addEventListener("click", closeDrawer);
+      drawerOverlay.addEventListener("click", closeDrawer);
+
+      // Session Management
       let sessionId = localStorage.getItem("argus_session_id");
       if (!sessionId) {
         sessionId = crypto.randomUUID();
@@ -446,7 +692,7 @@
       }
 
       // -------------------------------------------------------------
-      // Web Audio Visualizer Engine
+      // Web Audio Visualizer
       // -------------------------------------------------------------
       function initVisualizer(stream) {
         if (!audioCtx) {
@@ -459,7 +705,7 @@
         }
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 64; // Produces 32 frequency buckets for clear, wide bars
+        analyser.fftSize = 64;
         analyser.smoothingTimeConstant = 0.8;
 
         audioSource = audioCtx.createMediaStreamSource(stream);
@@ -476,13 +722,11 @@
 
         function draw(timestamp) {
           animFrameId = requestAnimationFrame(draw);
-
           canvasCtx.clearRect(0, 0, width, height);
 
           if (isRecording && analyser) {
             analyser.getByteFrequencyData(dataArray);
           } else {
-            // Idle ambient HUD oscillation when silent or assistant is not recording
             for (let i = 0; i < bufferLength; i++) {
               const speed = timestamp * 0.003;
               dataArray[i] = Math.max(8, Math.sin(speed + i * 0.3) * 20 + 22);
@@ -521,11 +765,10 @@
         animFrameId = requestAnimationFrame(draw);
       }
 
-      // Initialize the visualizer in idle mode right away
       renderWaveform();
 
       // -------------------------------------------------------------
-      // Text-To-Speech Output
+      // Text-To-Speech Synthesis
       // -------------------------------------------------------------
       function speakDirective(text) {
         if (!ttsEnabled || !("speechSynthesis" in window)) return;
@@ -574,7 +817,7 @@
       }
 
       // -------------------------------------------------------------
-      // Command Dispatcher
+      // Chat Dispatcher
       // -------------------------------------------------------------
       async function sendDirective(message) {
         if (!message || !message.trim()) return;
@@ -622,7 +865,7 @@
       }
 
       // -------------------------------------------------------------
-      // Audio Capture & Hardware Pipeline
+      // Voice Capture Pipeline
       // -------------------------------------------------------------
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -644,7 +887,6 @@
               }
             });
 
-            // Connect mic to real-time waveform bars
             initVisualizer(activeStream);
 
             let mimeType = "audio/webm;codecs=opus";
@@ -668,7 +910,6 @@
             };
 
             mediaRecorder.onstop = async () => {
-              // Teardown Web Audio analysis on the stream
               if (audioSource) {
                 audioSource.disconnect();
                 audioSource = null;
