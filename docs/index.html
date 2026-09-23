@@ -79,7 +79,7 @@
     main {
       flex: 1;
       display: grid;
-      grid-template-columns: 360px 1fr;
+      grid-template-columns: 380px 1fr;
       gap: 20px;
       padding: 20px;
       min-height: 0;
@@ -89,7 +89,7 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: space-between;
       background: var(--panel-bg);
       border: 1px solid var(--cyan-dim);
       border-radius: 6px;
@@ -99,13 +99,14 @@
     }
 
     .arc-reactor-box {
-      width: 200px;
-      height: 200px;
+      width: 190px;
+      height: 190px;
       position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
+      margin-top: 10px;
     }
 
     .outer-ring {
@@ -138,7 +139,6 @@
       transition: all 0.3s ease;
     }
 
-    /* Listening / Recording State (Amber) */
     .arc-reactor-box.recording .reactor-core {
       background: radial-gradient(circle, #fff 0%, var(--alert-amber) 60%, transparent 100%);
       box-shadow: 0 0 35px var(--alert-amber);
@@ -151,7 +151,6 @@
       animation-duration: 3s;
     }
 
-    /* Vocal Response Speaking State (Pulse Cyan) */
     .arc-reactor-box.speaking .reactor-core {
       animation: corePulse 0.8s alternate infinite ease-in-out;
       box-shadow: 0 0 45px var(--cyan-primary), 0 0 60px #fff;
@@ -163,11 +162,28 @@
       box-shadow: 0 0 24px var(--cyan-glow);
     }
 
+    /* Waveform Canvas Area */
+    .visualizer-container {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #visualizer-canvas {
+      width: 100%;
+      height: 90px;
+      background: rgba(0, 15, 30, 0.6);
+      border: 1px solid var(--cyan-dim);
+      border-radius: 4px;
+      box-shadow: inset 0 0 10px rgba(0, 240, 255, 0.1);
+    }
+
     .core-label {
-      margin-top: 24px;
       font-size: 0.75rem;
       letter-spacing: 2px;
-      opacity: 0.8;
+      opacity: 0.85;
       text-align: center;
     }
 
@@ -276,7 +292,7 @@
     @media (max-width: 850px) {
       main {
         grid-template-columns: 1fr;
-        grid-template-rows: 240px 1fr;
+        grid-template-rows: 320px 1fr;
       }
     }
 
@@ -312,7 +328,11 @@
         <div class="inner-ring"></div>
         <div class="reactor-core"></div>
       </div>
-      <div id="voice-label" class="core-label">CLICK CORE OR [MIC] TO TRANSMIT</div>
+
+      <div class="visualizer-container">
+        <canvas id="visualizer-canvas" width="340" height="90"></canvas>
+        <div id="voice-label" class="core-label">CLICK CORE OR [MIC] TO TRANSMIT</div>
+      </div>
     </div>
 
     <div class="terminal-container">
@@ -342,6 +362,12 @@
       let isRecording = false;
       let activeStream = null;
 
+      // Web Audio API State
+      let audioCtx = null;
+      let analyser = null;
+      let audioSource = null;
+      let animFrameId = null;
+
       const terminal = document.getElementById("terminal-logs");
       const promptInput = document.getElementById("prompt-input");
       const execBtn = document.getElementById("exec-btn");
@@ -351,8 +377,13 @@
       const statusTools = document.getElementById("status-tools");
       const statusKey = document.getElementById("status-key");
       const statusTts = document.getElementById("status-tts");
+      const canvas = document.getElementById("visualizer-canvas");
+      const canvasCtx = canvas.getContext("2d");
 
-      // Sync Audio Toggle State
+      // Set canvas render resolution to prevent blurring
+      canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
+      canvas.height = canvas.clientHeight * window.devicePixelRatio || 90;
+
       function updateTtsUi() {
         statusTts.textContent = ttsEnabled ? "AUDIO: ON" : "AUDIO: MUTED";
         if (ttsEnabled) {
@@ -373,7 +404,6 @@
         }
       });
 
-      // Token management
       if (authToken !== "default_secret_token") {
         statusKey.textContent = "AUTH LOADED";
         statusKey.classList.add("active");
@@ -415,13 +445,93 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // Voice Synthesis Engine (JARVIS Voice Profile)
+      // -------------------------------------------------------------
+      // Web Audio Visualizer Engine
+      // -------------------------------------------------------------
+      function initVisualizer(stream) {
+        if (!audioCtx) {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          audioCtx = new AudioContextClass();
+        }
+
+        if (audioCtx.state === "suspended") {
+          audioCtx.resume();
+        }
+
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 64; // Produces 32 frequency buckets for clear, wide bars
+        analyser.smoothingTimeConstant = 0.8;
+
+        audioSource = audioCtx.createMediaStreamSource(stream);
+        audioSource.connect(analyser);
+
+        renderWaveform();
+      }
+
+      function renderWaveform() {
+        const width = canvas.width;
+        const height = canvas.height;
+        const bufferLength = analyser ? analyser.frequencyBinCount : 32;
+        const dataArray = new Uint8Array(bufferLength);
+
+        function draw(timestamp) {
+          animFrameId = requestAnimationFrame(draw);
+
+          canvasCtx.clearRect(0, 0, width, height);
+
+          if (isRecording && analyser) {
+            analyser.getByteFrequencyData(dataArray);
+          } else {
+            // Idle ambient HUD oscillation when silent or assistant is not recording
+            for (let i = 0; i < bufferLength; i++) {
+              const speed = timestamp * 0.003;
+              dataArray[i] = Math.max(8, Math.sin(speed + i * 0.3) * 20 + 22);
+            }
+          }
+
+          const barCount = 24;
+          const barSpacing = 4;
+          const totalSpacing = barSpacing * (barCount - 1);
+          const barWidth = (width - totalSpacing - 24) / barCount;
+
+          for (let i = 0; i < barCount; i++) {
+            const rawVal = dataArray[i % bufferLength] || 0;
+            const barHeight = Math.max(4, (rawVal / 255) * (height - 14));
+
+            const x = 12 + i * (barWidth + barSpacing);
+            const y = (height - barHeight) / 2;
+
+            if (isRecording) {
+              canvasCtx.fillStyle = "#ffb84d";
+              canvasCtx.shadowColor = "rgba(255, 184, 77, 0.8)";
+            } else if (reactorBox.classList.contains("speaking")) {
+              canvasCtx.fillStyle = "#00f0ff";
+              canvasCtx.shadowColor = "rgba(0, 240, 255, 0.9)";
+            } else {
+              canvasCtx.fillStyle = "rgba(0, 240, 255, 0.35)";
+              canvasCtx.shadowColor = "rgba(0, 240, 255, 0.2)";
+            }
+
+            canvasCtx.shadowBlur = 6;
+            canvasCtx.fillRect(x, y, barWidth, barHeight);
+          }
+        }
+
+        if (animFrameId) cancelAnimationFrame(animFrameId);
+        animFrameId = requestAnimationFrame(draw);
+      }
+
+      // Initialize the visualizer in idle mode right away
+      renderWaveform();
+
+      // -------------------------------------------------------------
+      // Text-To-Speech Output
+      // -------------------------------------------------------------
       function speakDirective(text) {
         if (!ttsEnabled || !("speechSynthesis" in window)) return;
 
-        window.speechSynthesis.cancel(); // Stop overlapping speech
+        window.speechSynthesis.cancel();
 
-        // Clean out markdown characters and symbols for natural vocal flow
         const cleanText = text
           .replace(/[*_#`~\[\]\(\)]/g, "")
           .replace(/https?:\/\/\S+/g, "link provided")
@@ -430,10 +540,9 @@
         if (!cleanText) return;
 
         const utterance = new SpeechSynthesisUtterance(cleanText);
-        utterance.rate = 1.05; // Slightly brisk executive cadence
-        utterance.pitch = 0.95; // Slightly deeper, refined pitch
+        utterance.rate = 1.05;
+        utterance.pitch = 0.95;
 
-        // Select British/Refined English voice if available
         const voices = window.speechSynthesis.getVoices();
         const preferredVoice = voices.find(v => 
           (v.lang.includes("en-GB") || v.name.includes("UK") || v.name.includes("British") || v.name.includes("Daniel") || v.name.includes("Arthur")) &&
@@ -460,15 +569,16 @@
         window.speechSynthesis.speak(utterance);
       }
 
-      // Preload available voices
       if ("speechSynthesis" in window) {
         window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
       }
 
+      // -------------------------------------------------------------
+      // Command Dispatcher
+      // -------------------------------------------------------------
       async function sendDirective(message) {
         if (!message || !message.trim()) return;
 
-        // Cancel previous speech if user interrupts with new command
         if (window.speechSynthesis) window.speechSynthesis.cancel();
         reactorBox.classList.remove("speaking");
 
@@ -500,7 +610,7 @@
 
           const data = await res.json();
           appendLog("ARGUS", data.reply);
-          speakDirective(data.reply); // Vocalize the assistant reply
+          speakDirective(data.reply);
         } catch (err) {
           appendLog("ERROR", `Directive failed: ${err.message}`, "error");
         } finally {
@@ -511,9 +621,12 @@
         }
       }
 
+      // -------------------------------------------------------------
+      // Audio Capture & Hardware Pipeline
+      // -------------------------------------------------------------
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          appendLog("ERROR", "Microphone API requires HTTPS.", "error");
+          appendLog("ERROR", "Microphone API requires HTTPS context.", "error");
           return;
         }
 
@@ -530,6 +643,9 @@
                 sampleRate: 44100
               }
             });
+
+            // Connect mic to real-time waveform bars
+            initVisualizer(activeStream);
 
             let mimeType = "audio/webm;codecs=opus";
             if (!MediaRecorder.isTypeSupported(mimeType)) {
@@ -552,6 +668,12 @@
             };
 
             mediaRecorder.onstop = async () => {
+              // Teardown Web Audio analysis on the stream
+              if (audioSource) {
+                audioSource.disconnect();
+                audioSource = null;
+              }
+
               if (activeStream) {
                 activeStream.getTracks().forEach(t => t.stop());
                 activeStream = null;
