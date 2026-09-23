@@ -297,10 +297,8 @@
       box-shadow: 0 0 14px var(--alert-amber);
     }
 
-    /* ========================================================= */
-    /* Slide-out Memory Bank Drawer                              */
-    /* ========================================================= */
-    .memory-drawer {
+    /* Slide-out Drawers */
+    .hud-drawer {
       position: fixed;
       top: 0;
       right: -420px;
@@ -316,7 +314,7 @@
       flex-direction: column;
     }
 
-    .memory-drawer.open {
+    .hud-drawer.open {
       right: 0;
     }
 
@@ -329,7 +327,7 @@
     }
 
     .drawer-title {
-      font-size: 1.1rem;
+      font-size: 1.05rem;
       letter-spacing: 2px;
       font-weight: bold;
     }
@@ -348,7 +346,7 @@
       color: var(--alert-red);
     }
 
-    .memory-list {
+    .drawer-list {
       flex: 1;
       overflow-y: auto;
       padding: 16px;
@@ -357,35 +355,39 @@
       gap: 12px;
     }
 
-    .memory-card {
+    .hud-card {
       background: rgba(0, 240, 255, 0.04);
       border: 1px solid var(--cyan-dim);
       border-radius: 4px;
       padding: 12px;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 6px;
       transition: border-color 0.2s;
     }
 
-    .memory-card:hover {
+    .hud-card:hover {
       border-color: var(--cyan-primary);
     }
 
-    .memory-meta {
+    .hud-card-meta {
       display: flex;
       justify-content: space-between;
       font-size: 0.7rem;
-      opacity: 0.7;
+      opacity: 0.8;
     }
 
-    .memory-category {
+    .badge-canvas {
       color: var(--alert-amber);
-      text-transform: uppercase;
-      letter-spacing: 1px;
+      font-weight: bold;
     }
 
-    .memory-fact {
+    .badge-primary {
+      color: var(--cyan-primary);
+      font-weight: bold;
+    }
+
+    .hud-card-title {
       font-size: 0.85rem;
       color: #e0f7fa;
       line-height: 1.4;
@@ -428,7 +430,7 @@
         grid-template-columns: 1fr;
         grid-template-rows: 320px 1fr;
       }
-      .memory-drawer {
+      .hud-drawer {
         width: 100vw;
         right: -100vw;
       }
@@ -453,6 +455,7 @@
   <header>
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
+      <div id="btn-agenda" class="status-tag" title="View Canvas & Calendar Agenda">AGENDA // CANV</div>
       <div id="btn-memory" class="status-tag" title="Open Long-Term Memory Bank">MEMORY BANK</div>
       <div id="status-tts" class="status-tag active" title="Toggle audio voice playback">AUDIO: ON</div>
       <div id="status-key" class="status-tag" title="Click to update token">SET AUTH TOKEN</div>
@@ -490,16 +493,24 @@
     </div>
   </main>
 
-  <!-- Slide-out Drawer Component -->
   <div id="drawer-overlay" class="drawer-overlay"></div>
-  <aside id="memory-drawer" class="memory-drawer">
+
+  <!-- Memory Bank Drawer -->
+  <aside id="memory-drawer" class="hud-drawer">
     <div class="drawer-header">
       <div class="drawer-title">PERMANENT MEMORY BANK</div>
-      <button id="drawer-close" class="drawer-close">[CLOSE]</button>
+      <button id="memory-close" class="drawer-close">[CLOSE]</button>
     </div>
-    <div id="memory-list" class="memory-list">
-      <div class="log-line"><span class="log-content">Loading stored memories...</span></div>
+    <div id="memory-list" class="drawer-list"></div>
+  </aside>
+
+  <!-- Canvas Agenda Drawer -->
+  <aside id="agenda-drawer" class="hud-drawer">
+    <div class="drawer-header">
+      <div class="drawer-title">CANVAS & CALENDAR AGENDA</div>
+      <button id="agenda-close" class="drawer-close">[CLOSE]</button>
     </div>
+    <div id="agenda-list" class="drawer-list"></div>
   </aside>
 
   <script>
@@ -527,11 +538,17 @@
       const statusTools = document.getElementById("status-tools");
       const statusKey = document.getElementById("status-key");
       const statusTts = document.getElementById("status-tts");
+      
+      const drawerOverlay = document.getElementById("drawer-overlay");
       const btnMemory = document.getElementById("btn-memory");
       const memoryDrawer = document.getElementById("memory-drawer");
-      const drawerOverlay = document.getElementById("drawer-overlay");
-      const drawerClose = document.getElementById("drawer-close");
+      const memoryClose = document.getElementById("memory-close");
       const memoryList = document.getElementById("memory-list");
+
+      const btnAgenda = document.getElementById("btn-agenda");
+      const agendaDrawer = document.getElementById("agenda-drawer");
+      const agendaClose = document.getElementById("agenda-close");
+      const agendaList = document.getElementById("agenda-list");
 
       const canvas = document.getElementById("visualizer-canvas");
       const canvasCtx = canvas.getContext("2d");
@@ -575,8 +592,80 @@
         }
       });
 
+      function closeAllDrawers() {
+        memoryDrawer.classList.remove("open");
+        agendaDrawer.classList.remove("open");
+        drawerOverlay.classList.remove("open");
+      }
+
+      drawerOverlay.addEventListener("click", closeAllDrawers);
+      memoryClose.addEventListener("click", closeAllDrawers);
+      agendaClose.addEventListener("click", closeAllDrawers);
+
       // =========================================================
-      // Memory Drawer Logic
+      // Agenda Drawer Handling
+      // =========================================================
+      async function loadAgenda() {
+        agendaList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Querying Canvas & Calendar feeds...</div>';
+        try {
+          const res = await fetch(`${API_BASE}/agenda`, {
+            headers: { "Authorization": `Bearer ${authToken.trim()}` }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          renderAgenda(data.events || []);
+        } catch (err) {
+          agendaList.innerHTML = `<div style="color:var(--alert-red); font-size:0.85rem;">Failed to load agenda: ${err.message}</div>`;
+        }
+      }
+
+      function renderAgenda(events) {
+        if (!events.length) {
+          agendaList.innerHTML = '<div style="font-size:0.85rem; opacity:0.7;">No upcoming assignments or events detected.</div>';
+          return;
+        }
+
+        agendaList.innerHTML = "";
+        events.forEach(e => {
+          const card = document.createElement("div");
+          card.className = "hud-card";
+
+          const meta = document.createElement("div");
+          meta.className = "hud-card-meta";
+
+          const badge = document.createElement("span");
+          const isCanvas = (e.calendar || "").toLowerCase().includes("canvas");
+          badge.className = isCanvas ? "badge-canvas" : "badge-primary";
+          badge.textContent = e.calendar.toUpperCase();
+
+          const dateStr = document.createElement("span");
+          if (e.start) {
+            const d = new Date(e.start);
+            dateStr.textContent = isNaN(d.getTime()) ? e.start : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+          }
+
+          meta.appendChild(badge);
+          meta.appendChild(dateStr);
+
+          const title = document.createElement("div");
+          title.className = "hud-card-title";
+          title.textContent = e.summary;
+
+          card.appendChild(meta);
+          card.appendChild(title);
+          agendaList.appendChild(card);
+        });
+      }
+
+      btnAgenda.addEventListener("click", () => {
+        closeAllDrawers();
+        agendaDrawer.classList.add("open");
+        drawerOverlay.classList.add("open");
+        loadAgenda();
+      });
+
+      // =========================================================
+      // Memory Drawer Handling
       // =========================================================
       async function loadMemories() {
         memoryList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Fetching records from SQLite...</div>';
@@ -601,14 +690,14 @@
         memoryList.innerHTML = "";
         memories.forEach(m => {
           const card = document.createElement("div");
-          card.className = "memory-card";
+          card.className = "hud-card";
 
           const meta = document.createElement("div");
-          meta.className = "memory-meta";
+          meta.className = "hud-card-meta";
 
           const cat = document.createElement("span");
-          cat.className = "memory-category";
-          cat.textContent = m.category || "GENERAL";
+          cat.className = "badge-canvas";
+          cat.textContent = (m.category || "GENERAL").toUpperCase();
 
           const date = document.createElement("span");
           date.textContent = m.created_at ? m.created_at.slice(0, 10) : "";
@@ -617,7 +706,7 @@
           meta.appendChild(date);
 
           const fact = document.createElement("div");
-          fact.className = "memory-fact";
+          fact.className = "hud-card-title";
           fact.textContent = m.fact;
 
           const delBtn = document.createElement("button");
@@ -644,26 +733,18 @@
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           cardElement.remove();
-          appendLog("SYSTEM", `Memory #${id} purged from permanent storage.`, "system");
+          appendLog("SYSTEM", `Memory #${id} purged.`, "system");
         } catch (err) {
           alert(`Failed to delete record: ${err.message}`);
         }
       }
 
-      function openDrawer() {
+      btnMemory.addEventListener("click", () => {
+        closeAllDrawers();
         memoryDrawer.classList.add("open");
         drawerOverlay.classList.add("open");
         loadMemories();
-      }
-
-      function closeDrawer() {
-        memoryDrawer.classList.remove("open");
-        drawerOverlay.classList.remove("open");
-      }
-
-      btnMemory.addEventListener("click", openDrawer);
-      drawerClose.addEventListener("click", closeDrawer);
-      drawerOverlay.addEventListener("click", closeDrawer);
+      });
 
       // Session Management
       let sessionId = localStorage.getItem("argus_session_id");
@@ -691,9 +772,7 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // -------------------------------------------------------------
-      // Web Audio Visualizer
-      // -------------------------------------------------------------
+      // Visualizer Engine
       function initVisualizer(stream) {
         if (!audioCtx) {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -767,9 +846,7 @@
 
       renderWaveform();
 
-      // -------------------------------------------------------------
-      // Text-To-Speech Synthesis
-      // -------------------------------------------------------------
+      // Vocal Feedback
       function speakDirective(text) {
         if (!ttsEnabled || !("speechSynthesis" in window)) return;
 
@@ -816,9 +893,7 @@
         window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
       }
 
-      // -------------------------------------------------------------
-      // Chat Dispatcher
-      // -------------------------------------------------------------
+      // Directive Execution
       async function sendDirective(message) {
         if (!message || !message.trim()) return;
 
@@ -864,9 +939,7 @@
         }
       }
 
-      // -------------------------------------------------------------
-      // Voice Capture Pipeline
-      // -------------------------------------------------------------
+      // Voice Capture
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone API requires HTTPS context.", "error");
