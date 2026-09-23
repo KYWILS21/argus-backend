@@ -126,6 +126,7 @@
       border-top-color: transparent;
       animation: spinCounter 10s linear infinite;
       box-shadow: 0 0 12px var(--cyan-glow);
+      transition: all 0.3s ease;
     }
 
     .reactor-core {
@@ -137,6 +138,7 @@
       transition: all 0.3s ease;
     }
 
+    /* Listening / Recording State (Amber) */
     .arc-reactor-box.recording .reactor-core {
       background: radial-gradient(circle, #fff 0%, var(--alert-amber) 60%, transparent 100%);
       box-shadow: 0 0 35px var(--alert-amber);
@@ -147,6 +149,18 @@
       border-color: var(--alert-amber);
       box-shadow: 0 0 16px var(--alert-amber);
       animation-duration: 3s;
+    }
+
+    /* Vocal Response Speaking State (Pulse Cyan) */
+    .arc-reactor-box.speaking .reactor-core {
+      animation: corePulse 0.8s alternate infinite ease-in-out;
+      box-shadow: 0 0 45px var(--cyan-primary), 0 0 60px #fff;
+    }
+
+    .arc-reactor-box.speaking .inner-ring {
+      animation-duration: 1.5s;
+      border-width: 3px;
+      box-shadow: 0 0 24px var(--cyan-glow);
     }
 
     .core-label {
@@ -273,6 +287,11 @@
     @keyframes spinCounter {
       100% { transform: rotate(-360deg); }
     }
+
+    @keyframes corePulse {
+      0% { transform: scale(0.92); opacity: 0.8; }
+      100% { transform: scale(1.18); opacity: 1.0; }
+    }
   </style>
 </head>
 <body>
@@ -280,6 +299,7 @@
   <header>
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
+      <div id="status-tts" class="status-tag active" title="Toggle audio voice playback">AUDIO: ON</div>
       <div id="status-key" class="status-tag" title="Click to update token">SET AUTH TOKEN</div>
       <div id="status-tools" class="status-tag">SYSTEM IDLE</div>
     </div>
@@ -314,9 +334,8 @@
   <script>
     document.addEventListener("DOMContentLoaded", () => {
       const API_BASE = "https://argus-backend-production-e7bd.up.railway.app";
-      
-      // Load saved token from browser storage or default to Railway fallback
       let authToken = localStorage.getItem("argus_auth_bearer") || "default_secret_token";
+      let ttsEnabled = localStorage.getItem("argus_tts_enabled") !== "false";
 
       let mediaRecorder = null;
       let audioChunks = [];
@@ -331,15 +350,37 @@
       const voiceLabel = document.getElementById("voice-label");
       const statusTools = document.getElementById("status-tools");
       const statusKey = document.getElementById("status-key");
+      const statusTts = document.getElementById("status-tts");
 
-      // Check key state
+      // Sync Audio Toggle State
+      function updateTtsUi() {
+        statusTts.textContent = ttsEnabled ? "AUDIO: ON" : "AUDIO: MUTED";
+        if (ttsEnabled) {
+          statusTts.classList.add("active");
+        } else {
+          statusTts.classList.remove("active");
+        }
+      }
+      updateTtsUi();
+
+      statusTts.addEventListener("click", () => {
+        ttsEnabled = !ttsEnabled;
+        localStorage.setItem("argus_tts_enabled", ttsEnabled);
+        updateTtsUi();
+        if (!ttsEnabled && window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+          reactorBox.classList.remove("speaking");
+        }
+      });
+
+      // Token management
       if (authToken !== "default_secret_token") {
         statusKey.textContent = "AUTH LOADED";
         statusKey.classList.add("active");
       }
 
       statusKey.addEventListener("click", () => {
-        const inputKey = prompt("Enter your ARGUS_BEARER_TOKEN value from Railway:", authToken);
+        const inputKey = prompt("Enter your ARGUS_BEARER_TOKEN from Railway:", authToken);
         if (inputKey !== null && inputKey.trim()) {
           authToken = inputKey.trim();
           localStorage.setItem("argus_auth_bearer", authToken);
@@ -374,8 +415,63 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
+      // Voice Synthesis Engine (JARVIS Voice Profile)
+      function speakDirective(text) {
+        if (!ttsEnabled || !("speechSynthesis" in window)) return;
+
+        window.speechSynthesis.cancel(); // Stop overlapping speech
+
+        // Clean out markdown characters and symbols for natural vocal flow
+        const cleanText = text
+          .replace(/[*_#`~\[\]\(\)]/g, "")
+          .replace(/https?:\/\/\S+/g, "link provided")
+          .trim();
+
+        if (!cleanText) return;
+
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        utterance.rate = 1.05; // Slightly brisk executive cadence
+        utterance.pitch = 0.95; // Slightly deeper, refined pitch
+
+        // Select British/Refined English voice if available
+        const voices = window.speechSynthesis.getVoices();
+        const preferredVoice = voices.find(v => 
+          (v.lang.includes("en-GB") || v.name.includes("UK") || v.name.includes("British") || v.name.includes("Daniel") || v.name.includes("Arthur")) &&
+          !v.name.includes("Female")
+        ) || voices.find(v => v.lang.startsWith("en"));
+
+        if (preferredVoice) utterance.voice = preferredVoice;
+
+        utterance.onstart = () => {
+          reactorBox.classList.add("speaking");
+          voiceLabel.textContent = "TRANSMITTING VOCAL FEED...";
+        };
+
+        utterance.onend = () => {
+          reactorBox.classList.remove("speaking");
+          voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
+        };
+
+        utterance.onerror = () => {
+          reactorBox.classList.remove("speaking");
+          voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
+        };
+
+        window.speechSynthesis.speak(utterance);
+      }
+
+      // Preload available voices
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+      }
+
       async function sendDirective(message) {
         if (!message || !message.trim()) return;
+
+        // Cancel previous speech if user interrupts with new command
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        reactorBox.classList.remove("speaking");
+
         appendLog("KYLE", message, "user");
         if (promptInput) promptInput.value = "";
         if (statusTools) {
@@ -394,7 +490,7 @@
           });
 
           if (res.status === 403) {
-            throw new Error("403 Forbidden: Token does not match ARGUS_BEARER_TOKEN in Railway. Click [SET AUTH TOKEN] in the top bar to set it.");
+            throw new Error("403 Forbidden: Bearer token rejected. Click [SET AUTH TOKEN].");
           }
 
           if (!res.ok) {
@@ -404,6 +500,7 @@
 
           const data = await res.json();
           appendLog("ARGUS", data.reply);
+          speakDirective(data.reply); // Vocalize the assistant reply
         } catch (err) {
           appendLog("ERROR", `Directive failed: ${err.message}`, "error");
         } finally {
@@ -416,9 +513,12 @@
 
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          appendLog("ERROR", "Microphone API unavailable. Page must be served over HTTPS.", "error");
+          appendLog("ERROR", "Microphone API requires HTTPS.", "error");
           return;
         }
+
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        reactorBox.classList.remove("speaking");
 
         if (!isRecording) {
           try {
@@ -461,7 +561,7 @@
               const audioBlob = new Blob(audioChunks, { type: actualType });
 
               if (audioBlob.size < 4000) {
-                appendLog("SYSTEM", "Audio sample too short or silent. Please speak and try again.", "system");
+                appendLog("SYSTEM", "Audio sample too short or silent. Please speak clearly.", "system");
                 if (voiceLabel) voiceLabel.textContent = "CLICK CORE OR [MIC] TO TRANSMIT";
                 return;
               }
@@ -474,7 +574,6 @@
               formData.append("file", audioBlob, `speech.${ext}`);
 
               try {
-                // Call /transcribe with trailing slash fallback support
                 const res = await fetch(`${API_BASE}/transcribe`, {
                   method: "POST",
                   headers: { "Authorization": `Bearer ${authToken.trim()}` },
@@ -482,7 +581,7 @@
                 });
 
                 if (res.status === 403) {
-                  throw new Error("403 Forbidden: Bearer token rejected by backend. Click [SET AUTH TOKEN] in header.");
+                  throw new Error("403 Forbidden: Bearer token rejected. Click [SET AUTH TOKEN].");
                 }
 
                 if (!res.ok) {
@@ -509,7 +608,7 @@
             if (reactorBox) reactorBox.classList.add("recording");
             if (micBtn) micBtn.classList.add("active");
             if (voiceLabel) voiceLabel.textContent = "RECORDING... CLICK WHEN FINISHED SPEAKING";
-            appendLog("SYSTEM", "Recording speech...", "system");
+            appendLog("SYSTEM", "Listening to audio input...", "system");
 
           } catch (err) {
             appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
