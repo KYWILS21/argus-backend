@@ -833,7 +833,8 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
         "You have direct execution powers over:\n"
-        "1. RESERVATIONS & BOOKINGS: Use restaurant_reservation_tool and check_schedule_conflict. When the user asks to book a restaurant, check their calendar for conflicts first, find the venue, place a hold on their calendar, and provide the direct booking channel.\n"
+        "1. RESERVATIONS & BOOKINGS: Use check_schedule_conflict and restaurant_reservation_tool.\n"
+        "   - IMPORTANT: After checking for conflicts and finding the schedule clear, DO NOT STOP. Proceed immediately to recommend the venue, place the hold on the calendar, and provide the direct booking link.\n"
         "2. GITHUB & ACCOUNTS: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
         "3. LIVE SEARCH: web_search_tool.\n"
         "4. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
@@ -841,7 +842,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
-        "- Act as an authoritative executive agent. When asked to complete a task, execute the tools and report the results crisply."
+        "- When given a multi-part directive (e.g. 'check schedule and book'), execute ALL necessary tools in sequence before finalizing your reply."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -853,18 +854,29 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     messages.append({"role": "user", "content": request.message})
     save_message(session_id, "user", request.message)
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=messages,
-            tools=tools_schema,
-            tool_choice="auto",
-            temperature=0.4
-        )
+    reply_text = ""
+    max_turns = 5  # Allow up to 5 sequential tool operations
+    turn_count = 0
 
-        response_msg = response.choices[0].message
-        
-        if response_msg.tool_calls:
+    try:
+        while turn_count < max_turns:
+            turn_count += 1
+            response = groq_client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=messages,
+                tools=tools_schema,
+                tool_choice="auto",
+                temperature=0.4
+            )
+
+            response_msg = response.choices[0].message
+
+            # If no further tool calls are requested, we have our final synthesized answer
+            if not response_msg.tool_calls:
+                reply_text = response_msg.content or "Task completed."
+                break
+
+            # Append the assistant's tool-call request to the message stream
             messages.append({
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -881,34 +893,24 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 ]
             })
 
-            last_tool_output = ""
+            # Execute all tool calls in this turn
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-                
+
                 if fn_name in tool_dispatch:
                     fn_result = tool_dispatch[fn_name](**fn_args)
                 else:
                     fn_result = f"Error: Function {fn_name} not found."
 
-                last_tool_output = str(fn_result)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": last_tool_output
+                    "content": str(fn_result)
                 })
 
-            second_response = groq_client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=messages,
-                tools=tools_schema,
-                temperature=0.4
-            )
-            
-            content_output = second_response.choices[0].message.content
-            reply_text = content_output if (content_output and content_output.strip()) else last_tool_output
-        else:
-            reply_text = response_msg.content or "No response generated."
+        if not reply_text:
+            reply_text = "Directive executed successfully."
 
     except Exception as e:
         reply_text = f"ARGUS backend error: {str(e)}"
