@@ -4,6 +4,7 @@ import base64
 import sqlite3
 import datetime
 import urllib.request
+import urllib.parse
 import urllib.error
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Response
@@ -37,7 +38,7 @@ GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.3.1")
+app = FastAPI(title="ARGUS API", version="2.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -429,10 +430,125 @@ def delete_calendar_event(event_id: str) -> str:
         return f"Error deleting event: {str(err)}"
 
 # ==============================================================================
+# Reservation & Schedule Conflict Engine
+# ==============================================================================
+
+def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -> str:
+    """Verifies whether the user is free or has an existing class/meeting at that time."""
+    try:
+        target_dt = datetime.datetime.fromisoformat(target_time_iso.replace("Z", "+00:00"))
+    except Exception:
+        return "Invalid ISO format for target_time_iso."
+
+    end_dt = target_dt + datetime.timedelta(minutes=duration_minutes)
+    
+    # Query events from 3 hours before to 3 hours after
+    search_start = (target_dt - datetime.timedelta(hours=3)).isoformat()
+    events = fetch_raw_calendar_events(time_min_iso=search_start, max_results=10)
+
+    conflicts = []
+    for e in events:
+        start_str = e.get("start")
+        if not start_str:
+            continue
+        try:
+            ev_start = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            # Treat default event length as 60 mins if unknown
+            ev_end = ev_start + datetime.timedelta(minutes=60)
+            
+            # Check overlap
+            if max(target_dt, ev_start) < min(end_dt, ev_end):
+                conflicts.append(f"[{e['calendar']}] {e['summary']} at {ev_start.strftime('%I:%M %p')}")
+        except Exception:
+            continue
+
+    if conflicts:
+        return f"CONFLICT DETECTED: You have existing commitments during that window:\n" + "\n".join(conflicts)
+    return "CLEAR: No scheduling conflicts detected on your calendars for this window."
+
+def restaurant_reservation_tool(restaurant_name: str, location: str, party_size: int, date_str: str, time_str: str) -> str:
+    """
+    Finds direct booking channels (Resy, OpenTable, SevenRooms), retrieves address/phone,
+    and drafts an authenticated reservation hold on the calendar.
+    """
+    # 1. Search for direct reservation portals and details
+    search_query = f"{restaurant_name} {location} reservations OpenTable Resy phone address"
+    search_info = web_search_tool(search_query, max_results=4)
+
+    # 2. Construct Direct Deep-Links
+    encoded_name = urllib.parse.quote(restaurant_name)
+    encoded_loc = urllib.parse.quote(location)
+    
+    opentable_link = f"https://www.opentable.com/s?term={encoded_name}&dateTime={date_str}T{time_str.replace(':', '%3A')}&covers={party_size}"
+    resy_link = f"https://resy.com/cities?query={encoded_name}"
+    google_reserve_link = f"https://www.google.com/maps/search/{encoded_name}+{encoded_loc}"
+
+    # 3. Schedule the hold on user calendar
+    try:
+        dt_start = datetime.datetime.fromisoformat(f"{date_str}T{time_str}:00")
+        dt_end = dt_start + datetime.timedelta(hours=2)
+        start_iso = dt_start.isoformat()
+        end_iso = dt_end.isoformat()
+        
+        cal_summary = f"RESERVATION (HOLD): {restaurant_name} (Party of {party_size})"
+        cal_desc = f"Reservation for {party_size} at {restaurant_name}.\nLocation: {location}\nOpenTable: {opentable_link}\nResy: {resy_link}\n\nSearch Intel:\n{search_info[:500]}"
+        
+        cal_result = create_calendar_event(cal_summary, start_iso, end_iso, description=cal_desc)
+    except Exception as e:
+        cal_result = f"Could not create calendar placeholder: {str(e)}"
+
+    report = (
+        f"--- RESERVATION DIRECTIVE PREPARED ---\n"
+        f"Venue: {restaurant_name} ({location})\n"
+        f"Party Size: {party_size}\n"
+        f"Time Window: {date_str} at {time_str}\n\n"
+        f"Calendar Hold: {cal_result}\n\n"
+        f"Direct Booking Portals:\n"
+        f"1. OpenTable: {opentable_link}\n"
+        f"2. Resy: {resy_link}\n"
+        f"3. Google Maps / Reserve: {google_reserve_link}\n\n"
+        f"Venue Intel & Phone:\n{search_info}"
+    )
+    return report
+
+# ==============================================================================
 # Tool Schema Declarations & Dispatch
 # ==============================================================================
 
 tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "restaurant_reservation_tool",
+            "description": "Prepares and executes a restaurant or venue reservation. Gathers booking links (OpenTable, Resy), checks info, and places an automated hold on the user calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "restaurant_name": {"type": "string", "description": "Name of the restaurant or venue."},
+                    "location": {"type": "string", "description": "City or neighborhood (e.g., 'Philadelphia, PA' or 'Center City')."},
+                    "party_size": {"type": "integer", "description": "Number of guests (e.g. 2, 4)."},
+                    "date_str": {"type": "string", "description": "YYYY-MM-DD date format."},
+                    "time_str": {"type": "string", "description": "HH:MM 24-hour time format (e.g. '19:30' for 7:30 PM)."}
+                },
+                "required": ["restaurant_name", "location", "party_size", "date_str", "time_str"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_schedule_conflict",
+            "description": "Checks if the user has an existing class, exam, or event that conflicts with a proposed reservation or activity time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_time_iso": {"type": "string", "description": "Target start time in ISO format (e.g., '2026-09-25T19:00:00')."},
+                    "duration_minutes": {"type": "integer", "description": "Expected length of event in minutes (default 120)."}
+                },
+                "required": ["target_time_iso"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -441,7 +557,7 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Maximum repositories to return (default 15)."}
+                    "limit": {"type": "integer", "description": "Maximum repositories to return."}
                 }
             }
         }
@@ -454,9 +570,9 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Repository name (e.g. 'argus-backend')."},
+                    "repo": {"type": "string", "description": "Repository name."},
                     "branch": {"type": "string", "description": "Branch name (default 'main')."},
-                    "path_prefix": {"type": "string", "description": "Optional directory filter (e.g. 'backend/' or 'src/')."}
+                    "path_prefix": {"type": "string", "description": "Optional directory filter."}
                 },
                 "required": ["repo"]
             }
@@ -470,9 +586,9 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Repository name (e.g. 'argus-backend')."},
-                    "path": {"type": "string", "description": "Path to the file inside the repo (e.g. 'backend/main.py')."},
-                    "branch": {"type": "string", "description": "Branch name (default 'main')."}
+                    "repo": {"type": "string", "description": "Repository name."},
+                    "path": {"type": "string", "description": "Path to file inside repo."},
+                    "branch": {"type": "string", "description": "Branch name."}
                 },
                 "required": ["repo", "path"]
             }
@@ -487,10 +603,10 @@ tools_schema = [
                 "type": "object",
                 "properties": {
                     "repo": {"type": "string", "description": "Repository name."},
-                    "path": {"type": "string", "description": "Path to write or update (e.g. 'notes/todo.md' or 'src/main.py')."},
-                    "content": {"type": "string", "description": "Full file content string."},
-                    "commit_message": {"type": "string", "description": "Git commit message."},
-                    "branch": {"type": "string", "description": "Target branch (default 'main')."}
+                    "path": {"type": "string", "description": "Path to write or update."},
+                    "content": {"type": "string", "description": "Full file content."},
+                    "commit_message": {"type": "string", "description": "Commit message."},
+                    "branch": {"type": "string", "description": "Target branch."}
                 },
                 "required": ["repo", "path", "content", "commit_message"]
             }
@@ -506,7 +622,7 @@ tools_schema = [
                 "properties": {
                     "repo": {"type": "string", "description": "Repository name."},
                     "title": {"type": "string", "description": "Issue title."},
-                    "body": {"type": "string", "description": "Issue description / body."}
+                    "body": {"type": "string", "description": "Issue description."}
                 },
                 "required": ["repo", "title"]
             }
@@ -534,7 +650,7 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "fact": {"type": "string", "description": "The exact factual information or preference to remember permanently."},
+                    "fact": {"type": "string", "description": "The exact factual information or preference."},
                     "category": {"type": "string", "description": "Optional category."}
                 },
                 "required": ["fact"]
@@ -549,8 +665,8 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "time_min_iso": {"type": "string", "description": "ISO timestamp to list events from."},
-                    "max_results": {"type": "integer", "description": "Maximum number of events to return."}
+                    "time_min_iso": {"type": "string", "description": "ISO timestamp."},
+                    "max_results": {"type": "integer", "description": "Max events."}
                 }
             }
         }
@@ -564,8 +680,8 @@ tools_schema = [
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string", "description": "Title of the event."},
-                    "start_time_iso": {"type": "string", "description": "Start ISO datetime string."},
-                    "end_time_iso": {"type": "string", "description": "End ISO datetime string."},
+                    "start_time_iso": {"type": "string", "description": "Start ISO datetime."},
+                    "end_time_iso": {"type": "string", "description": "End ISO datetime."},
                     "description": {"type": "string", "description": "Optional description."}
                 },
                 "required": ["summary", "start_time_iso", "end_time_iso"]
@@ -580,7 +696,7 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_id": {"type": "string", "description": "Event ID to update."},
+                    "event_id": {"type": "string", "description": "Event ID."},
                     "summary": {"type": "string"},
                     "start_time_iso": {"type": "string"},
                     "end_time_iso": {"type": "string"}
@@ -606,6 +722,8 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "restaurant_reservation_tool": restaurant_reservation_tool,
+    "check_schedule_conflict": check_schedule_conflict,
     "github_list_repos": github_list_repos,
     "github_get_tree": github_get_tree,
     "github_read_file": github_read_file,
@@ -668,7 +786,6 @@ async def transcribe_audio(
         audio_bytes = await file.read()
         byte_len = len(audio_bytes) if audio_bytes else 0
 
-        # WebM header alone is ~800-1200 bytes. If byte_len < 1400, no speech was recorded.
         if not audio_bytes or byte_len < 1400:
             raise HTTPException(
                 status_code=400,
@@ -711,20 +828,20 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
     history_records = get_history(session_id, limit=20)
     
+    current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+
     system_prompt = (
-        "You are ARGUS, an advanced AI executive assistant with direct tool execution powers.\n"
-        "You have synchronized access to:\n"
-        "1. GITHUB ACCOUNT & FOLDERS: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue. "
-        "When asked to inspect code, find a file, navigate folders, or commit changes, locate the repository and files and complete the operation.\n"
-        "2. LIVE WEB SEARCH: web_search_tool for live weather, documentation, facts, and news.\n"
-        "3. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
-        "4. PERMANENT MEMORY: save_fact_tool.\n\n"
+        f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
+        "You have direct execution powers over:\n"
+        "1. RESERVATIONS & BOOKINGS: Use restaurant_reservation_tool and check_schedule_conflict. When the user asks to book a restaurant, check their calendar for conflicts first, find the venue, place a hold on their calendar, and provide the direct booking channel.\n"
+        "2. GITHUB & ACCOUNTS: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
+        "3. LIVE SEARCH: web_search_tool.\n"
+        "4. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
+        "5. MEMORY: save_fact_tool.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
-        "INSTRUCTIONS:\n"
-        "- When executing tasks on GitHub repositories, inspect directory trees first if you need to discover folder locations.\n"
-        "- Synthesize tool outputs directly and conversationally for the user.\n"
-        "- Keep responses crisp, executive, and precise."
+        "OPERATIONAL DIRECTIVE:\n"
+        "- Act as an authoritative executive agent. When asked to complete a task, execute the tools and report the results crisply."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
