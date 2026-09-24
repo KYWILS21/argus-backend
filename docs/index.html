@@ -530,6 +530,7 @@
       let audioChunks = [];
       let isRecording = false;
       let activeStream = null;
+      let recordingStartTime = 0;
 
       let audioCtx = null;
       let analyser = null;
@@ -947,7 +948,7 @@
         }
       }
 
-      // Robust Audio Recording Pipeline
+      // Robust Sequential Audio Capture
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone access requires HTTPS.", "error");
@@ -959,7 +960,6 @@
 
         if (!isRecording) {
           try {
-            // Flexible constraints to avoid hardware sample-rate rejection
             activeStream = await navigator.mediaDevices.getUserMedia({
               audio: {
                 echoCancellation: true,
@@ -983,6 +983,7 @@
 
             mediaRecorder = mimeType ? new MediaRecorder(activeStream, { mimeType }) : new MediaRecorder(activeStream);
             audioChunks = [];
+            recordingStartTime = Date.now();
 
             mediaRecorder.ondataavailable = (e) => {
               if (e.data && e.data.size > 0) {
@@ -1003,11 +1004,15 @@
 
               const actualType = mediaRecorder.mimeType || "audio/webm";
               const audioBlob = new Blob(audioChunks, { type: actualType });
+              const durationSec = ((Date.now() - recordingStartTime) / 1000).toFixed(1);
 
-              // Lower threshold to 800 bytes for short spoken commands
-              if (audioBlob.size < 800) {
-                appendLog("SYSTEM", "Audio sample too short or silent. Please speak and try again.", "system");
+              appendLog("SYSTEM", `Captured ${audioBlob.size} bytes over ${durationSec}s.`, "system");
+
+              // If file is below 1400 bytes, it's just the WebM header without voice packets
+              if (audioBlob.size < 1400) {
+                appendLog("SYSTEM", "Sample was too short or silent. Speak a complete directive and click to stop.", "system");
                 voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
+                if (statusTools) statusTools.textContent = "SYSTEM IDLE";
                 return;
               }
 
@@ -1048,8 +1053,8 @@
               }
             };
 
-            // Start full stream recording without fragmented timeslices
-            mediaRecorder.start();
+            // Request timeslices every 250ms to guarantee regular data flushes
+            mediaRecorder.start(250);
             isRecording = true;
             reactorBox.classList.add("recording");
             voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
@@ -1060,9 +1065,14 @@
             voiceLabel.textContent = "MIC ACCESS ERROR";
           }
         } else {
-          // Normal clean stop
-          if (mediaRecorder && mediaRecorder.state !== "inactive") {
-            mediaRecorder.stop();
+          // Explicit flush before closing
+          if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.requestData();
+            setTimeout(() => {
+              if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+              }
+            }, 100);
           }
           isRecording = false;
           reactorBox.classList.remove("recording");

@@ -37,7 +37,7 @@ GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.3.0")
+app = FastAPI(title="ARGUS API", version="2.3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -198,7 +198,6 @@ def _github_api_request(endpoint: str, method: str = "GET", payload: Optional[Di
         raise RuntimeError(f"GitHub API {e.code} error: {err_msg}")
 
 def github_list_repos(limit: int = 15) -> str:
-    """Lists repositories owned or accessible by the authenticated user."""
     try:
         data = _github_api_request(f"/user/repos?sort=updated&per_page={limit}")
         if not data:
@@ -209,7 +208,6 @@ def github_list_repos(limit: int = 15) -> str:
         return f"Failed to list GitHub repositories: {str(e)}"
 
 def github_get_tree(repo: str, branch: str = "main", path_prefix: Optional[str] = None) -> str:
-    """Recursively lists all files and folders in a repository to locate files."""
     owner = GITHUB_DEFAULT_OWNER
     if "/" in repo:
         owner, repo = repo.split("/", 1)
@@ -232,7 +230,6 @@ def github_get_tree(repo: str, branch: str = "main", path_prefix: Optional[str] 
         return f"Failed to fetch directory tree: {str(e)}"
 
 def github_read_file(repo: str, path: str, branch: str = "main") -> str:
-    """Reads and returns the contents of a specific file in a GitHub repository."""
     owner = GITHUB_DEFAULT_OWNER
     if "/" in repo:
         owner, repo = repo.split("/", 1)
@@ -247,19 +244,17 @@ def github_read_file(repo: str, path: str, branch: str = "main") -> str:
         return f"Failed to read file '{path}': {str(e)}"
 
 def github_write_file(repo: str, path: str, content: str, commit_message: str, branch: str = "main") -> str:
-    """Creates or updates a file directly in a repository and commits it."""
     owner = GITHUB_DEFAULT_OWNER
     if "/" in repo:
         owner, repo = repo.split("/", 1)
     clean_path = path.strip("/")
     sha = None
 
-    # Check if file exists to retrieve current SHA for updates
     try:
         existing = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
         sha = existing.get("sha")
     except Exception:
-        pass  # File is new
+        pass
 
     payload: Dict[str, Any] = {
         "message": commit_message,
@@ -277,7 +272,6 @@ def github_write_file(repo: str, path: str, content: str, commit_message: str, b
         return f"Failed to commit file '{path}': {str(e)}"
 
 def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
-    """Creates an issue or task item on a repository."""
     owner = GITHUB_DEFAULT_OWNER
     if "/" in repo:
         owner, repo = repo.split("/", 1)
@@ -672,10 +666,13 @@ async def transcribe_audio(
 
     try:
         audio_bytes = await file.read()
-        if not audio_bytes or len(audio_bytes) < 4000:
+        byte_len = len(audio_bytes) if audio_bytes else 0
+
+        # WebM header alone is ~800-1200 bytes. If byte_len < 1400, no speech was recorded.
+        if not audio_bytes or byte_len < 1400:
             raise HTTPException(
                 status_code=400,
-                detail=f"Audio sample too short or empty ({len(audio_bytes) if audio_bytes else 0} bytes)."
+                detail=f"Audio sample contains only container headers ({byte_len} bytes). Please speak before clicking stop."
             )
 
         filename = file.filename or "recording.webm"
