@@ -1,20 +1,21 @@
 import os
 import json
+import base64
 import sqlite3
 import datetime
+import urllib.request
+import urllib.error
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
 
-# Support both new ddgs package and legacy duckduckgo_search
 try:
     from ddgs import DDGS
 except ImportError:
     from duckduckgo_search import DDGS
 
-# Optional Google Calendar dependencies
 try:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -31,9 +32,12 @@ ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
+
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.2.0")
+app = FastAPI(title="ARGUS API", version="2.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -167,7 +171,125 @@ def delete_memory_by_id(memory_id: int) -> bool:
     return affected > 0
 
 # ==============================================================================
-# Live Web Search Tool
+# GitHub Integration Tools
+# ==============================================================================
+
+def _github_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
+    if not GITHUB_TOKEN:
+        raise ValueError("GITHUB_TOKEN is not configured in Railway environment variables.")
+
+    url = f"https://api.github.com{endpoint}"
+    data_bytes = json.dumps(payload).encode("utf-8") if payload else None
+    
+    req = urllib.request.Request(url, data=data_bytes, method=method)
+    req.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "ARGUS-Assistant")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    if payload:
+        req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            content = resp.read().decode("utf-8")
+            return json.loads(content) if content else {}
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8")
+        raise RuntimeError(f"GitHub API {e.code} error: {err_msg}")
+
+def github_list_repos(limit: int = 15) -> str:
+    """Lists repositories owned or accessible by the authenticated user."""
+    try:
+        data = _github_api_request(f"/user/repos?sort=updated&per_page={limit}")
+        if not data:
+            return "No repositories found for this account."
+        repos = [f"- {r['full_name']} (Private: {r['private']}, Description: {r['description'] or 'None'})" for r in data]
+        return "\n".join(repos)
+    except Exception as e:
+        return f"Failed to list GitHub repositories: {str(e)}"
+
+def github_get_tree(repo: str, branch: str = "main", path_prefix: Optional[str] = None) -> str:
+    """Recursively lists all files and folders in a repository to locate files."""
+    owner = GITHUB_DEFAULT_OWNER
+    if "/" in repo:
+        owner, repo = repo.split("/", 1)
+    try:
+        data = _github_api_request(f"/repos/{owner}/{repo}/git/trees/{branch}?recursive=1")
+        tree = data.get("tree", [])
+        if not tree:
+            return f"No files detected on branch '{branch}' for {owner}/{repo}."
+
+        files = []
+        for item in tree:
+            p = item.get("path", "")
+            if path_prefix and not p.startswith(path_prefix.strip("/")):
+                continue
+            item_type = "DIR " if item.get("type") == "tree" else "FILE"
+            files.append(f"[{item_type}] {p}")
+
+        return "\n".join(files[:60]) if files else f"No files matching prefix '{path_prefix}'."
+    except Exception as e:
+        return f"Failed to fetch directory tree: {str(e)}"
+
+def github_read_file(repo: str, path: str, branch: str = "main") -> str:
+    """Reads and returns the contents of a specific file in a GitHub repository."""
+    owner = GITHUB_DEFAULT_OWNER
+    if "/" in repo:
+        owner, repo = repo.split("/", 1)
+    clean_path = path.strip("/")
+    try:
+        data = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
+        if data.get("encoding") == "base64" and data.get("content"):
+            decoded = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+            return f"--- Content of {clean_path} ({owner}/{repo}) ---\n{decoded}"
+        return f"File found but unexpected encoding or directory: {clean_path}"
+    except Exception as e:
+        return f"Failed to read file '{path}': {str(e)}"
+
+def github_write_file(repo: str, path: str, content: str, commit_message: str, branch: str = "main") -> str:
+    """Creates or updates a file directly in a repository and commits it."""
+    owner = GITHUB_DEFAULT_OWNER
+    if "/" in repo:
+        owner, repo = repo.split("/", 1)
+    clean_path = path.strip("/")
+    sha = None
+
+    # Check if file exists to retrieve current SHA for updates
+    try:
+        existing = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
+        sha = existing.get("sha")
+    except Exception:
+        pass  # File is new
+
+    payload: Dict[str, Any] = {
+        "message": commit_message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "branch": branch
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        resp = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}", method="PUT", payload=payload)
+        commit_sha = resp.get("commit", {}).get("sha", "")[:7]
+        return f"Successfully committed '{clean_path}' to {owner}/{repo} on branch '{branch}' (Commit: {commit_sha})."
+    except Exception as e:
+        return f"Failed to commit file '{path}': {str(e)}"
+
+def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
+    """Creates an issue or task item on a repository."""
+    owner = GITHUB_DEFAULT_OWNER
+    if "/" in repo:
+        owner, repo = repo.split("/", 1)
+    payload = {"title": title, "body": body or ""}
+    try:
+        resp = _github_api_request(f"/repos/{owner}/{repo}/issues", method="POST", payload=payload)
+        return f"Issue created: #{resp.get('number')} '{resp.get('title')}' ({resp.get('html_url')})"
+    except Exception as e:
+        return f"Failed to create issue: {str(e)}"
+
+# ==============================================================================
+# Live Web Search & Google Calendar
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
@@ -186,10 +308,6 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
             return "\n\n".join(output)
     except Exception as e:
         return f"Web search error: {str(e)}"
-
-# ==============================================================================
-# Google Calendar Suite (Multi-Calendar & Canvas)
-# ==============================================================================
 
 def get_calendar_service():
     if not CALENDAR_AVAILABLE:
@@ -263,8 +381,7 @@ def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: i
 
         all_events.sort(key=lambda x: x['start'] if x['start'] else "")
         return all_events[:max_results]
-    except Exception as e:
-        print(f"[Calendar Event Fetch Error] {e}")
+    except Exception:
         return []
 
 def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
@@ -318,10 +435,89 @@ def delete_calendar_event(event_id: str) -> str:
         return f"Error deleting event: {str(err)}"
 
 # ==============================================================================
-# Tool Declarations & Dispatch
+# Tool Schema Declarations & Dispatch
 # ==============================================================================
 
 tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "github_list_repos",
+            "description": "Lists repositories in the user's GitHub account.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Maximum repositories to return (default 15)."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_get_tree",
+            "description": "Lists all folders and files inside a GitHub repo to locate target folders and file paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository name (e.g. 'argus-backend')."},
+                    "branch": {"type": "string", "description": "Branch name (default 'main')."},
+                    "path_prefix": {"type": "string", "description": "Optional directory filter (e.g. 'backend/' or 'src/')."}
+                },
+                "required": ["repo"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_read_file",
+            "description": "Reads and inspects code or text from any file in a GitHub repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository name (e.g. 'argus-backend')."},
+                    "path": {"type": "string", "description": "Path to the file inside the repo (e.g. 'backend/main.py')."},
+                    "branch": {"type": "string", "description": "Branch name (default 'main')."}
+                },
+                "required": ["repo", "path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_write_file",
+            "description": "Creates a new file or updates an existing file with a commit directly into the GitHub repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository name."},
+                    "path": {"type": "string", "description": "Path to write or update (e.g. 'notes/todo.md' or 'src/main.py')."},
+                    "content": {"type": "string", "description": "Full file content string."},
+                    "commit_message": {"type": "string", "description": "Git commit message."},
+                    "branch": {"type": "string", "description": "Target branch (default 'main')."}
+                },
+                "required": ["repo", "path", "content", "commit_message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_create_issue",
+            "description": "Creates a new issue or tracking ticket on a GitHub repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository name."},
+                    "title": {"type": "string", "description": "Issue title."},
+                    "body": {"type": "string", "description": "Issue description / body."}
+                },
+                "required": ["repo", "title"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -345,7 +541,7 @@ tools_schema = [
                 "type": "object",
                 "properties": {
                     "fact": {"type": "string", "description": "The exact factual information or preference to remember permanently."},
-                    "category": {"type": "string", "description": "Optional category (e.g. 'identity', 'preference', 'project')."}
+                    "category": {"type": "string", "description": "Optional category."}
                 },
                 "required": ["fact"]
             }
@@ -355,7 +551,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "list_calendar_events",
-            "description": "Lists upcoming events across all calendars including Canvas feeds, school schedules, and primary calendar.",
+            "description": "Lists upcoming events across all calendars including Canvas feeds and personal calendar.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -416,6 +612,11 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "github_list_repos": github_list_repos,
+    "github_get_tree": github_get_tree,
+    "github_read_file": github_read_file,
+    "github_write_file": github_write_file,
+    "github_create_issue": github_create_issue,
     "web_search_tool": web_search_tool,
     "save_fact_tool": save_fact_tool,
     "list_calendar_events": list_calendar_events,
@@ -455,7 +656,6 @@ def delete_memory(memory_id: int, token: str = Depends(verify_token)):
         raise HTTPException(status_code=404, detail="Memory record not found.")
     return {"status": "deleted", "id": memory_id}
 
-# Dedicated structured agenda endpoint for HUD widgets
 @app.get("/agenda")
 def get_agenda(token: str = Depends(verify_token)):
     events = fetch_raw_calendar_events(max_results=20)
@@ -512,19 +712,22 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
-
     history_records = get_history(session_id, limit=20)
     
     system_prompt = (
-        "You are ARGUS, an advanced AI executive assistant with live tool access.\n"
-        "You have direct access to: Web Search (web_search_tool), Google Calendar (list_calendar_events, etc.), and persistent memory.\n\n"
+        "You are ARGUS, an advanced AI executive assistant with direct tool execution powers.\n"
+        "You have synchronized access to:\n"
+        "1. GITHUB ACCOUNT & FOLDERS: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue. "
+        "When asked to inspect code, find a file, navigate folders, or commit changes, locate the repository and files and complete the operation.\n"
+        "2. LIVE WEB SEARCH: web_search_tool for live weather, documentation, facts, and news.\n"
+        "3. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
+        "4. PERMANENT MEMORY: save_fact_tool.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
-        "MANDATORY INSTRUCTIONS:\n"
-        "1. Live Info & Weather: You DO have live internet access via web_search_tool. Always call web_search_tool when asked about weather, current events, or web lookups.\n"
-        "2. Answering Tool Calls: Once a tool returns data, explain and synthesize that data directly into a conversational, direct response for the user.\n"
-        "3. Long-Term Facts: Call save_fact_tool whenever the user states personal facts or preferences.\n"
-        "4. Keep responses professional, helpful, and concise."
+        "INSTRUCTIONS:\n"
+        "- When executing tasks on GitHub repositories, inspect directory trees first if you need to discover folder locations.\n"
+        "- Synthesize tool outputs directly and conversationally for the user.\n"
+        "- Keep responses crisp, executive, and precise."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -542,7 +745,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
             messages=messages,
             tools=tools_schema,
             tool_choice="auto",
-            temperature=0.5
+            temperature=0.4
         )
 
         response_msg = response.choices[0].message
@@ -585,7 +788,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 model="openai/gpt-oss-20b",
                 messages=messages,
                 tools=tools_schema,
-                temperature=0.5
+                temperature=0.4
             )
             
             content_output = second_response.choices[0].message.content
