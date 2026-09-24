@@ -6,6 +6,7 @@ import datetime
 import urllib.request
 import urllib.parse
 import urllib.error
+from email.message import EmailMessage
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,9 +21,9 @@ except ImportError:
 try:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
-    CALENDAR_AVAILABLE = True
+    GOOGLE_APIS_AVAILABLE = True
 except ImportError:
-    CALENDAR_AVAILABLE = False
+    GOOGLE_APIS_AVAILABLE = False
 
 # ==============================================================================
 # Configuration & Initialization
@@ -38,7 +39,7 @@ GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.4.0")
+app = FastAPI(title="ARGUS API", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -170,6 +171,150 @@ def delete_memory_by_id(memory_id: int) -> bool:
     conn.commit()
     conn.close()
     return affected > 0
+
+# ==============================================================================
+# Google OAuth Client Factory (Calendar & Gmail)
+# ==============================================================================
+
+def get_google_credentials():
+    if not GOOGLE_APIS_AVAILABLE:
+        return None
+
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
+    access_token = os.getenv("ACCESS_TOKEN")
+
+    creds_info = None
+    if client_id and client_secret and refresh_token:
+        creds_info = {
+            "token": access_token,
+            "refresh_token": refresh_token,
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scopes": [
+                "https://www.googleapis.com/auth/calendar",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.compose",
+                "https://www.googleapis.com/auth/gmail.modify"
+            ]
+        }
+    elif GOOGLE_CALENDAR_TOKEN:
+        try:
+            creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
+        except Exception:
+            return None
+
+    if not creds_info:
+        return None
+
+    try:
+        return Credentials.from_authorized_user_info(creds_info)
+    except Exception:
+        return None
+
+def get_calendar_service():
+    creds = get_google_credentials()
+    if not creds:
+        return None
+    try:
+        return build("calendar", "v3", credentials=creds)
+    except Exception:
+        return None
+
+def get_gmail_service():
+    creds = get_google_credentials()
+    if not creds:
+        return None
+    try:
+        return build("gmail", "v1", credentials=creds)
+    except Exception:
+        return None
+
+# ==============================================================================
+# Gmail Tools
+# ==============================================================================
+
+def gmail_search_messages(query: str = "is:unread", max_results: int = 5) -> str:
+    """Searches Gmail using queries like 'is:unread', 'from:sender', or keywords."""
+    service = get_gmail_service()
+    if not service:
+        return "Gmail integration is not active or Google credentials are missing."
+
+    try:
+        results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
+        messages = results.get("messages", [])
+
+        if not messages:
+            return f"No messages found matching search query: '{query}'."
+
+        summaries = []
+        for m in messages:
+            msg_id = m["id"]
+            msg_detail = service.users().messages().get(
+                userId="me", id=msg_id, format="metadata",
+                metadataHeaders=["From", "Subject", "Date"]
+            ).execute()
+            
+            headers = {h["name"]: h["value"] for h in msg_detail.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "Unknown Sender")
+            subject = headers.get("Subject", "(No Subject)")
+            date = headers.get("Date", "")
+            snippet = msg_detail.get("snippet", "")
+
+            summaries.append(f"- [ID: {msg_id}] From: {sender}\n  Subject: {subject}\n  Date: {date}\n  Preview: {snippet}")
+
+        return "\n\n".join(summaries)
+    except Exception as e:
+        return f"Error querying Gmail: {str(e)}"
+
+def gmail_read_message(message_id: str) -> str:
+    """Fetches the full text content and metadata of a specific email by ID."""
+    service = get_gmail_service()
+    if not service:
+        return "Gmail integration is not active."
+
+    try:
+        msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        
+        sender = headers.get("From", "Unknown")
+        subject = headers.get("Subject", "No Subject")
+        date = headers.get("Date", "")
+        snippet = msg.get("snippet", "")
+
+        return (
+            f"--- Email Message Details ---\n"
+            f"ID: {message_id}\n"
+            f"From: {sender}\n"
+            f"Subject: {subject}\n"
+            f"Date: {date}\n\n"
+            f"Body Content / Snippet:\n{snippet}"
+        )
+    except Exception as e:
+        return f"Error reading message {message_id}: {str(e)}"
+
+def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
+    """Creates a draft email inside the user's Gmail drafts folder."""
+    service = get_gmail_service()
+    if not service:
+        return "Gmail integration is not active."
+
+    try:
+        message = EmailMessage()
+        message["To"] = to_address
+        message["Subject"] = subject
+        message.set_content(body_text)
+
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        create_message = {"message": {"raw": encoded_message}}
+
+        draft = service.users().drafts().create(userId="me", body=create_message).execute()
+        draft_id = draft.get("id")
+        return f"Draft created successfully in Gmail! (Draft ID: {draft_id})\nRecipient: {to_address}\nSubject: {subject}"
+    except Exception as e:
+        return f"Error creating Gmail draft: {str(e)}"
 
 # ==============================================================================
 # GitHub Integration Tools
@@ -304,40 +449,6 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     except Exception as e:
         return f"Web search error: {str(e)}"
 
-def get_calendar_service():
-    if not CALENDAR_AVAILABLE:
-        return None
-
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
-    access_token = os.getenv("ACCESS_TOKEN")
-
-    creds_info = None
-    if client_id and client_secret and refresh_token:
-        creds_info = {
-            "token": access_token,
-            "refresh_token": refresh_token,
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scopes": ["https://www.googleapis.com/auth/calendar"]
-        }
-    elif GOOGLE_CALENDAR_TOKEN:
-        try:
-            creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
-        except Exception:
-            return None
-
-    if not creds_info:
-        return None
-
-    try:
-        creds = Credentials.from_authorized_user_info(creds_info)
-        return build("calendar", "v3", credentials=creds)
-    except Exception:
-        return None
-
 def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
     service = get_calendar_service()
     if not service:
@@ -434,15 +545,12 @@ def delete_calendar_event(event_id: str) -> str:
 # ==============================================================================
 
 def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -> str:
-    """Verifies whether the user is free or has an existing class/meeting at that time."""
     try:
         target_dt = datetime.datetime.fromisoformat(target_time_iso.replace("Z", "+00:00"))
     except Exception:
         return "Invalid ISO format for target_time_iso."
 
     end_dt = target_dt + datetime.timedelta(minutes=duration_minutes)
-    
-    # Query events from 3 hours before to 3 hours after
     search_start = (target_dt - datetime.timedelta(hours=3)).isoformat()
     events = fetch_raw_calendar_events(time_min_iso=search_start, max_results=10)
 
@@ -453,10 +561,7 @@ def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -
             continue
         try:
             ev_start = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            # Treat default event length as 60 mins if unknown
             ev_end = ev_start + datetime.timedelta(minutes=60)
-            
-            # Check overlap
             if max(target_dt, ev_start) < min(end_dt, ev_end):
                 conflicts.append(f"[{e['calendar']}] {e['summary']} at {ev_start.strftime('%I:%M %p')}")
         except Exception:
@@ -467,15 +572,9 @@ def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -
     return "CLEAR: No scheduling conflicts detected on your calendars for this window."
 
 def restaurant_reservation_tool(restaurant_name: str, location: str, party_size: int, date_str: str, time_str: str) -> str:
-    """
-    Finds direct booking channels (Resy, OpenTable, SevenRooms), retrieves address/phone,
-    and drafts an authenticated reservation hold on the calendar.
-    """
-    # 1. Search for direct reservation portals and details
     search_query = f"{restaurant_name} {location} reservations OpenTable Resy phone address"
     search_info = web_search_tool(search_query, max_results=4)
 
-    # 2. Construct Direct Deep-Links
     encoded_name = urllib.parse.quote(restaurant_name)
     encoded_loc = urllib.parse.quote(location)
     
@@ -483,7 +582,6 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
     resy_link = f"https://resy.com/cities?query={encoded_name}"
     google_reserve_link = f"https://www.google.com/maps/search/{encoded_name}+{encoded_loc}"
 
-    # 3. Schedule the hold on user calendar
     try:
         dt_start = datetime.datetime.fromisoformat(f"{date_str}T{time_str}:00")
         dt_end = dt_start + datetime.timedelta(hours=2)
@@ -497,7 +595,7 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
     except Exception as e:
         cal_result = f"Could not create calendar placeholder: {str(e)}"
 
-    report = (
+    return (
         f"--- RESERVATION DIRECTIVE PREPARED ---\n"
         f"Venue: {restaurant_name} ({location})\n"
         f"Party Size: {party_size}\n"
@@ -509,7 +607,6 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
         f"3. Google Maps / Reserve: {google_reserve_link}\n\n"
         f"Venue Intel & Phone:\n{search_info}"
     )
-    return report
 
 # ==============================================================================
 # Tool Schema Declarations & Dispatch
@@ -519,16 +616,60 @@ tools_schema = [
     {
         "type": "function",
         "function": {
-            "name": "restaurant_reservation_tool",
-            "description": "Prepares and executes a restaurant or venue reservation. Gathers booking links (OpenTable, Resy), checks info, and places an automated hold on the user calendar.",
+            "name": "gmail_search_messages",
+            "description": "Searches the user's Gmail inbox for emails matching a query (e.g. 'is:unread', 'from:professor', 'subject:assignment').",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "restaurant_name": {"type": "string", "description": "Name of the restaurant or venue."},
-                    "location": {"type": "string", "description": "City or neighborhood (e.g., 'Philadelphia, PA' or 'Center City')."},
-                    "party_size": {"type": "integer", "description": "Number of guests (e.g. 2, 4)."},
+                    "query": {"type": "string", "description": "Gmail search query syntax (default 'is:unread')."},
+                    "max_results": {"type": "integer", "description": "Maximum emails to return (default 5)."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_read_message",
+            "description": "Reads the details and content of a specific email by its message ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The Gmail message ID to inspect."}
+                },
+                "required": ["message_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_create_draft",
+            "description": "Creates an email draft in the user's Gmail account for them to review or send.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_address": {"type": "string", "description": "Recipient email address."},
+                    "subject": {"type": "string", "description": "Subject line."},
+                    "body_text": {"type": "string", "description": "Full text body of the email."}
+                },
+                "required": ["to_address", "subject", "body_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restaurant_reservation_tool",
+            "description": "Prepares and executes a restaurant reservation. Gathers booking links, checks info, and places a calendar hold.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "restaurant_name": {"type": "string", "description": "Name of the restaurant."},
+                    "location": {"type": "string", "description": "City or neighborhood."},
+                    "party_size": {"type": "integer", "description": "Number of guests."},
                     "date_str": {"type": "string", "description": "YYYY-MM-DD date format."},
-                    "time_str": {"type": "string", "description": "HH:MM 24-hour time format (e.g. '19:30' for 7:30 PM)."}
+                    "time_str": {"type": "string", "description": "HH:MM 24-hour time format."}
                 },
                 "required": ["restaurant_name", "location", "party_size", "date_str", "time_str"]
             }
@@ -538,12 +679,12 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "check_schedule_conflict",
-            "description": "Checks if the user has an existing class, exam, or event that conflicts with a proposed reservation or activity time.",
+            "description": "Checks if the user has an existing class, exam, or event that conflicts with a proposed time.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target_time_iso": {"type": "string", "description": "Target start time in ISO format (e.g., '2026-09-25T19:00:00')."},
-                    "duration_minutes": {"type": "integer", "description": "Expected length of event in minutes (default 120)."}
+                    "target_time_iso": {"type": "string", "description": "Target start time in ISO format."},
+                    "duration_minutes": {"type": "integer", "description": "Duration in minutes."}
                 },
                 "required": ["target_time_iso"]
             }
@@ -566,7 +707,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "github_get_tree",
-            "description": "Lists all folders and files inside a GitHub repo to locate target folders and file paths.",
+            "description": "Lists all folders and files inside a GitHub repo.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -598,7 +739,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "github_write_file",
-            "description": "Creates a new file or updates an existing file with a commit directly into the GitHub repository.",
+            "description": "Creates a new file or updates an existing file in GitHub with a commit.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -616,7 +757,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "github_create_issue",
-            "description": "Creates a new issue or tracking ticket on a GitHub repository.",
+            "description": "Creates a new issue on a GitHub repository.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -722,6 +863,9 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "gmail_search_messages": gmail_search_messages,
+    "gmail_read_message": gmail_read_message,
+    "gmail_create_draft": gmail_create_draft,
     "restaurant_reservation_tool": restaurant_reservation_tool,
     "check_schedule_conflict": check_schedule_conflict,
     "github_list_repos": github_list_repos,
@@ -833,16 +977,17 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
         "You have direct execution powers over:\n"
-        "1. RESERVATIONS & BOOKINGS: Use check_schedule_conflict and restaurant_reservation_tool.\n"
-        "   - IMPORTANT: After checking for conflicts and finding the schedule clear, DO NOT STOP. Proceed immediately to recommend the venue, place the hold on the calendar, and provide the direct booking link.\n"
-        "2. GITHUB & ACCOUNTS: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
-        "3. LIVE SEARCH: web_search_tool.\n"
+        "1. GMAIL INTEGRATION: Use gmail_search_messages, gmail_read_message, and gmail_create_draft. "
+        "When asked about emails or inbox, search matching threads, summarize them, and draft replies when requested.\n"
+        "2. RESERVATIONS & BOOKINGS: check_schedule_conflict and restaurant_reservation_tool.\n"
+        "3. GITHUB: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
         "4. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
-        "5. MEMORY: save_fact_tool.\n\n"
+        "5. LIVE WEB SEARCH: web_search_tool.\n"
+        "6. MEMORY: save_fact_tool.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
-        "- When given a multi-part directive (e.g. 'check schedule and book'), execute ALL necessary tools in sequence before finalizing your reply."
+        "- When executing multi-turn tool commands, chain all necessary actions before finalizing the response."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -855,7 +1000,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     save_message(session_id, "user", request.message)
 
     reply_text = ""
-    max_turns = 5  # Allow up to 5 sequential tool operations
+    max_turns = 5
     turn_count = 0
 
     try:
@@ -871,12 +1016,10 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             response_msg = response.choices[0].message
 
-            # If no further tool calls are requested, we have our final synthesized answer
             if not response_msg.tool_calls:
                 reply_text = response_msg.content or "Task completed."
                 break
 
-            # Append the assistant's tool-call request to the message stream
             messages.append({
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -893,7 +1036,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 ]
             })
 
-            # Execute all tool calls in this turn
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
