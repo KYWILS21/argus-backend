@@ -94,7 +94,6 @@
       z-index: 1;
     }
 
-    /* Core Voice Hub Panel */
     .left-hud {
       display: flex;
       flex-direction: column;
@@ -201,7 +200,6 @@
       font-weight: bold;
     }
 
-    /* Terminal Transcript Container */
     .terminal-container {
       display: flex;
       flex-direction: column;
@@ -213,7 +211,6 @@
       box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5);
     }
 
-    /* Optional Slide-down Command Prompt */
     .optional-prompt-dock {
       display: none;
       padding: 14px 18px;
@@ -305,7 +302,6 @@
       word-break: break-word;
     }
 
-    /* Drawers */
     .hud-drawer {
       position: fixed;
       top: 0;
@@ -478,7 +474,6 @@
   </header>
 
   <main>
-    <!-- Voice-First Arc Core Hub -->
     <div class="left-hud">
       <div id="reactor-box" class="arc-reactor-box" title="Click core to toggle audio transmission">
         <div class="outer-ring"></div>
@@ -492,7 +487,6 @@
       </div>
     </div>
 
-    <!-- Terminal Transcript & Optional Input -->
     <div class="terminal-container">
       <div id="optional-prompt-dock" class="optional-prompt-dock">
         <input id="prompt-input" class="command-input" type="text" placeholder="Type directive here..." autocomplete="off">
@@ -510,7 +504,6 @@
 
   <div id="drawer-overlay" class="drawer-overlay"></div>
 
-  <!-- Memory Bank Drawer -->
   <aside id="memory-drawer" class="hud-drawer">
     <div class="drawer-header">
       <div class="drawer-title">PERMANENT MEMORY BANK</div>
@@ -519,7 +512,6 @@
     <div id="memory-list" class="drawer-list"></div>
   </aside>
 
-  <!-- Canvas Agenda Drawer -->
   <aside id="agenda-drawer" class="hud-drawer">
     <div class="drawer-header">
       <div class="drawer-title">CANVAS & CALENDAR AGENDA</div>
@@ -573,7 +565,6 @@
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
       canvas.height = canvas.clientHeight * window.devicePixelRatio || 85;
 
-      // Optional Keyboard Input Toggle
       btnToggleInput.addEventListener("click", () => {
         optionalPromptDock.classList.toggle("visible");
         btnToggleInput.classList.toggle("active");
@@ -628,9 +619,6 @@
       memoryClose.addEventListener("click", closeAllDrawers);
       agendaClose.addEventListener("click", closeAllDrawers);
 
-      // =========================================================
-      // Agenda Drawer
-      // =========================================================
       async function loadAgenda() {
         agendaList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Querying Canvas & Calendar feeds...</div>';
         try {
@@ -690,9 +678,6 @@
         loadAgenda();
       });
 
-      // =========================================================
-      // Memory Drawer
-      // =========================================================
       async function loadMemories() {
         memoryList.innerHTML = '<div style="font-size:0.8rem; opacity:0.7;">Fetching records from SQLite...</div>';
         try {
@@ -772,7 +757,6 @@
         loadMemories();
       });
 
-      // Session Management
       let sessionId = localStorage.getItem("argus_session_id");
       if (!sessionId) {
         sessionId = crypto.randomUUID();
@@ -798,7 +782,7 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // Visualizer Engine
+      // Web Audio Visualizer Setup
       function initVisualizer(stream) {
         if (!audioCtx) {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -872,7 +856,6 @@
 
       renderWaveform();
 
-      // Vocal Feedback
       function speakDirective(text) {
         if (!ttsEnabled || !("speechSynthesis" in window)) return;
 
@@ -919,7 +902,6 @@
         window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
       }
 
-      // Directive Execution
       async function sendDirective(message) {
         if (!message || !message.trim()) return;
 
@@ -965,10 +947,10 @@
         }
       }
 
-      // Voice Capture via Arc Reactor Click
+      // Robust Audio Recording Pipeline
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          appendLog("ERROR", "Microphone API requires HTTPS context.", "error");
+          appendLog("ERROR", "Microphone access requires HTTPS.", "error");
           return;
         }
 
@@ -977,12 +959,12 @@
 
         if (!isRecording) {
           try {
+            // Flexible constraints to avoid hardware sample-rate rejection
             activeStream = await navigator.mediaDevices.getUserMedia({
               audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 44100
+                autoGainControl: true
               }
             });
 
@@ -1022,13 +1004,14 @@
               const actualType = mediaRecorder.mimeType || "audio/webm";
               const audioBlob = new Blob(audioChunks, { type: actualType });
 
-              if (audioBlob.size < 4000) {
-                appendLog("SYSTEM", "Audio sample too short or silent. Please speak clearly.", "system");
-                if (voiceLabel) voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
+              // Lower threshold to 800 bytes for short spoken commands
+              if (audioBlob.size < 800) {
+                appendLog("SYSTEM", "Audio sample too short or silent. Please speak and try again.", "system");
+                voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
                 return;
               }
 
-              if (voiceLabel) voiceLabel.textContent = "TRANSCRIBING AUDIO...";
+              voiceLabel.textContent = "TRANSCRIBING AUDIO...";
               if (statusTools) statusTools.textContent = "WHISPER TRANSCRIBING...";
 
               const ext = actualType.includes("mp4") ? "m4a" : "webm";
@@ -1060,29 +1043,26 @@
               } catch (err) {
                 appendLog("ERROR", `Transcription failed: ${err.message}`, "error");
               } finally {
-                if (voiceLabel) voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
+                voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
                 if (statusTools) statusTools.textContent = "SYSTEM IDLE";
               }
             };
 
-            mediaRecorder.start(200);
+            // Start full stream recording without fragmented timeslices
+            mediaRecorder.start();
             isRecording = true;
             reactorBox.classList.add("recording");
             voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
-            appendLog("SYSTEM", "Listening to audio input...", "system");
+            appendLog("SYSTEM", "Microphone open. Listening...", "system");
 
           } catch (err) {
             appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
-            if (voiceLabel) voiceLabel.textContent = "MIC ACCESS ERROR";
+            voiceLabel.textContent = "MIC ACCESS ERROR";
           }
         } else {
+          // Normal clean stop
           if (mediaRecorder && mediaRecorder.state !== "inactive") {
-            mediaRecorder.requestData();
-            setTimeout(() => {
-              if (mediaRecorder && mediaRecorder.state !== "inactive") {
-                mediaRecorder.stop();
-              }
-            }, 300);
+            mediaRecorder.stop();
           }
           isRecording = false;
           reactorBox.classList.remove("recording");
