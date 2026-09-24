@@ -530,6 +530,7 @@
       let audioChunks = [];
       let isRecording = false;
       let activeStream = null;
+      let visualizerStream = null;
       let recordingStartTime = 0;
 
       let audioCtx = null;
@@ -783,8 +784,8 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // Web Audio Visualizer Setup
-      function initVisualizer(stream) {
+      // Web Audio Visualizer Setup (Isolated Stream Clone)
+      function initVisualizer(clonedStream) {
         if (!audioCtx) {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
           audioCtx = new AudioContextClass();
@@ -798,7 +799,11 @@
         analyser.fftSize = 64;
         analyser.smoothingTimeConstant = 0.8;
 
-        audioSource = audioCtx.createMediaStreamSource(stream);
+        if (audioSource) {
+          audioSource.disconnect();
+        }
+
+        audioSource = audioCtx.createMediaStreamSource(clonedStream);
         audioSource.connect(analyser);
 
         renderWaveform();
@@ -948,7 +953,7 @@
         }
       }
 
-      // Robust Sequential Audio Capture
+      // Robust Microphone Pipeline
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone access requires HTTPS.", "error");
@@ -960,28 +965,35 @@
 
         if (!isRecording) {
           try {
+            // Open direct microphone stream
             activeStream = await navigator.mediaDevices.getUserMedia({
               audio: {
+                channelCount: 1,
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true
               }
             });
 
-            initVisualizer(activeStream);
+            // Clone the stream so AudioContext never competes with MediaRecorder
+            visualizerStream = activeStream.clone();
+            initVisualizer(visualizerStream);
 
-            let mimeType = "audio/webm;codecs=opus";
-            if (!MediaRecorder.isTypeSupported(mimeType)) {
+            let selectedMime = "audio/webm;codecs=opus";
+            if (!MediaRecorder.isTypeSupported(selectedMime)) {
               if (MediaRecorder.isTypeSupported("audio/webm")) {
-                mimeType = "audio/webm";
+                selectedMime = "audio/webm";
               } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
-                mimeType = "audio/mp4";
+                selectedMime = "audio/mp4";
               } else {
-                mimeType = "";
+                selectedMime = "";
               }
             }
 
-            mediaRecorder = mimeType ? new MediaRecorder(activeStream, { mimeType }) : new MediaRecorder(activeStream);
+            mediaRecorder = selectedMime 
+              ? new MediaRecorder(activeStream, { mimeType: selectedMime, audioBitsPerSecond: 128000 })
+              : new MediaRecorder(activeStream);
+
             audioChunks = [];
             recordingStartTime = Date.now();
 
@@ -992,11 +1004,15 @@
             };
 
             mediaRecorder.onstop = async () => {
+              // Teardown cloned visualizer stream and main stream
+              if (visualizerStream) {
+                visualizerStream.getTracks().forEach(t => t.stop());
+                visualizerStream = null;
+              }
               if (audioSource) {
                 audioSource.disconnect();
                 audioSource = null;
               }
-
               if (activeStream) {
                 activeStream.getTracks().forEach(t => t.stop());
                 activeStream = null;
@@ -1006,11 +1022,11 @@
               const audioBlob = new Blob(audioChunks, { type: actualType });
               const durationSec = ((Date.now() - recordingStartTime) / 1000).toFixed(1);
 
-              appendLog("SYSTEM", `Captured ${audioBlob.size} bytes over ${durationSec}s.`, "system");
+              appendLog("SYSTEM", `Captured ${audioBlob.size} bytes (${audioChunks.length} chunks) over ${durationSec}s.`, "system");
 
-              // If file is below 1400 bytes, it's just the WebM header without voice packets
-              if (audioBlob.size < 1400) {
-                appendLog("SYSTEM", "Sample was too short or silent. Speak a complete directive and click to stop.", "system");
+              // Container header alone is ~800-1100 bytes; anything under 1500 lacks audio payload
+              if (audioBlob.size < 1500) {
+                appendLog("SYSTEM", "Sample contained no audio payload frames. Speak a full command before stopping.", "system");
                 voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
                 if (statusTools) statusTools.textContent = "SYSTEM IDLE";
                 return;
@@ -1043,7 +1059,7 @@
                 if (data.text && data.text.trim()) {
                   sendDirective(data.text);
                 } else {
-                  appendLog("SYSTEM", "No clear speech detected. Speak closer to the microphone.", "system");
+                  appendLog("SYSTEM", "Whisper completed: No clear speech recognized.", "system");
                 }
               } catch (err) {
                 appendLog("ERROR", `Transcription failed: ${err.message}`, "error");
@@ -1053,26 +1069,21 @@
               }
             };
 
-            // Request timeslices every 250ms to guarantee regular data flushes
-            mediaRecorder.start(250);
+            // Start recorder with continuous buffer
+            mediaRecorder.start();
             isRecording = true;
             reactorBox.classList.add("recording");
             voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
-            appendLog("SYSTEM", "Microphone open. Listening...", "system");
+            appendLog("SYSTEM", "Microphone open. Speak your directive...", "system");
 
           } catch (err) {
             appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
             voiceLabel.textContent = "MIC ACCESS ERROR";
           }
         } else {
-          // Explicit flush before closing
+          // Clean standard stop triggering onstop without race condition
           if (mediaRecorder && mediaRecorder.state === "recording") {
-            mediaRecorder.requestData();
-            setTimeout(() => {
-              if (mediaRecorder && mediaRecorder.state !== "inactive") {
-                mediaRecorder.stop();
-              }
-            }, 100);
+            mediaRecorder.stop();
           }
           isRecording = false;
           reactorBox.classList.remove("recording");
