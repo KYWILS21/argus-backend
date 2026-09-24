@@ -58,8 +58,9 @@
 
     .status-panel {
       display: flex;
-      gap: 12px;
+      gap: 10px;
       font-size: 0.8rem;
+      align-items: center;
     }
 
     .status-tag {
@@ -81,6 +82,24 @@
     .status-tag.active {
       border-color: var(--cyan-primary);
       background: rgba(0, 240, 255, 0.2);
+      box-shadow: 0 0 8px var(--cyan-glow);
+    }
+
+    /* Device Selector Dropdown */
+    .mic-select {
+      background: rgba(4, 14, 28, 0.95);
+      border: 1px solid var(--cyan-dim);
+      color: var(--cyan-primary);
+      padding: 5px 8px;
+      font-size: 0.75rem;
+      border-radius: 3px;
+      outline: none;
+      max-width: 170px;
+      cursor: pointer;
+    }
+
+    .mic-select:focus {
+      border-color: var(--cyan-primary);
       box-shadow: 0 0 8px var(--cyan-glow);
     }
 
@@ -464,7 +483,8 @@
   <header>
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
-      <div id="btn-toggle-input" class="status-tag" title="Toggle optional keyboard input">KEYBOARD INPUT</div>
+      <select id="mic-select" class="mic-select" title="Select audio input hardware"></select>
+      <div id="btn-toggle-input" class="status-tag" title="Toggle optional keyboard input">KEYBOARD</div>
       <div id="btn-agenda" class="status-tag" title="View Canvas & Calendar Agenda">AGENDA // CANV</div>
       <div id="btn-memory" class="status-tag" title="Open Long-Term Memory Bank">MEMORY BANK</div>
       <div id="status-tts" class="status-tag active" title="Toggle audio voice playback">AUDIO: ON</div>
@@ -496,7 +516,7 @@
       <div id="terminal-logs" class="terminal-logs">
         <div class="log-line">
           <span class="log-sender">ARGUS</span>
-          <span class="log-content">System online. Core voice interface active. Click the Arc Reactor to transmit verbal directives.</span>
+          <span class="log-content">System online. Select your microphone from the top bar, then click the Arc Reactor to transmit.</span>
         </div>
       </div>
     </div>
@@ -532,6 +552,7 @@
       let activeStream = null;
       let visualizerStream = null;
       let recordingStartTime = 0;
+      let selectedDeviceId = localStorage.getItem("argus_mic_id") || "";
 
       let audioCtx = null;
       let analyser = null;
@@ -546,6 +567,7 @@
       const statusTools = document.getElementById("status-tools");
       const statusKey = document.getElementById("status-key");
       const statusTts = document.getElementById("status-tts");
+      const micSelect = document.getElementById("mic-select");
       
       const btnToggleInput = document.getElementById("btn-toggle-input");
       const optionalPromptDock = document.getElementById("optional-prompt-dock");
@@ -566,6 +588,39 @@
 
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
       canvas.height = canvas.clientHeight * window.devicePixelRatio || 85;
+
+      // Populate Audio Input Devices
+      async function populateMicrophones() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const audioInputs = devices.filter(d => d.kind === "audioinput");
+
+          micSelect.innerHTML = "";
+          audioInputs.forEach((device, index) => {
+            const opt = document.createElement("option");
+            opt.value = device.deviceId;
+            opt.textContent = device.label || `Microphone ${index + 1}`;
+            if (device.deviceId === selectedDeviceId) opt.selected = true;
+            micSelect.appendChild(opt);
+          });
+
+          if (!selectedDeviceId && audioInputs.length > 0) {
+            selectedDeviceId = audioInputs[0].deviceId;
+          }
+        } catch (e) {
+          console.warn("Could not enumerate audio devices:", e);
+        }
+      }
+
+      micSelect.addEventListener("change", () => {
+        selectedDeviceId = micSelect.value;
+        localStorage.setItem("argus_mic_id", selectedDeviceId);
+        appendLog("SYSTEM", `Active mic switched to: ${micSelect.options[micSelect.selectedIndex].text}`, "system");
+      });
+
+      // Initial query for mic list
+      populateMicrophones();
 
       btnToggleInput.addEventListener("click", () => {
         optionalPromptDock.classList.toggle("visible");
@@ -784,7 +839,7 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // Web Audio Visualizer Setup (Isolated Stream Clone)
+      // Visualizer with Active Input Measurement
       function initVisualizer(clonedStream) {
         if (!audioCtx) {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -953,7 +1008,7 @@
         }
       }
 
-      // Robust Microphone Pipeline
+      // Audio Recording Pipeline with Explicit Device Constraint
       async function toggleVoiceRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone access requires HTTPS.", "error");
@@ -965,17 +1020,21 @@
 
         if (!isRecording) {
           try {
-            // Open direct microphone stream
-            activeStream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-              }
-            });
+            const audioConstraints = {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            };
 
-            // Clone the stream so AudioContext never competes with MediaRecorder
+            if (selectedDeviceId) {
+              audioConstraints.deviceId = { exact: selectedDeviceId };
+            }
+
+            activeStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+
+            // Refresh microphone list now that permission is granted (revealing real names)
+            populateMicrophones();
+
             visualizerStream = activeStream.clone();
             initVisualizer(visualizerStream);
 
@@ -1004,7 +1063,6 @@
             };
 
             mediaRecorder.onstop = async () => {
-              // Teardown cloned visualizer stream and main stream
               if (visualizerStream) {
                 visualizerStream.getTracks().forEach(t => t.stop());
                 visualizerStream = null;
@@ -1024,7 +1082,6 @@
 
               appendLog("SYSTEM", `Captured ${audioBlob.size} bytes (${audioChunks.length} chunks) over ${durationSec}s.`, "system");
 
-              // Container header alone is ~800-1100 bytes; anything under 1500 lacks audio payload
               if (audioBlob.size < 1500) {
                 appendLog("SYSTEM", "Sample contained no audio payload frames. Speak a full command before stopping.", "system");
                 voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
@@ -1069,7 +1126,6 @@
               }
             };
 
-            // Start recorder with continuous buffer
             mediaRecorder.start();
             isRecording = true;
             reactorBox.classList.add("recording");
@@ -1081,7 +1137,6 @@
             voiceLabel.textContent = "MIC ACCESS ERROR";
           }
         } else {
-          // Clean standard stop triggering onstop without race condition
           if (mediaRecorder && mediaRecorder.state === "recording") {
             mediaRecorder.stop();
           }
