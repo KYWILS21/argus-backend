@@ -39,7 +39,7 @@ GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.5.0")
+app = FastAPI(title="ARGUS API", version="2.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -270,7 +270,6 @@ def gmail_search_messages(query: str = "is:unread", max_results: int = 5) -> str
         return f"Error querying Gmail: {str(e)}"
 
 def gmail_read_message(message_id: str) -> str:
-    """Fetches the full text content and metadata of a specific email by ID."""
     service = get_gmail_service()
     if not service:
         return "Gmail integration is not active."
@@ -296,7 +295,6 @@ def gmail_read_message(message_id: str) -> str:
         return f"Error reading message {message_id}: {str(e)}"
 
 def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
-    """Creates a draft email inside the user's Gmail drafts folder."""
     service = get_gmail_service()
     if not service:
         return "Gmail integration is not active."
@@ -315,6 +313,118 @@ def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
         return f"Draft created successfully in Gmail! (Draft ID: {draft_id})\nRecipient: {to_address}\nSubject: {subject}"
     except Exception as e:
         return f"Error creating Gmail draft: {str(e)}"
+
+# ==============================================================================
+# Google Calendar & Search Tools
+# ==============================================================================
+
+def web_search_tool(query: str, max_results: int = 5) -> str:
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            if not results:
+                return f"No results found for search query: '{query}'"
+            
+            output = []
+            for r in results:
+                title = r.get("title", "Untitled")
+                body = r.get("body", "No description.")
+                href = r.get("href", "")
+                output.append(f"Title: {title}\nSnippet: {body}\nURL: {href}")
+            return "\n\n".join(output)
+    except Exception as e:
+        return f"Web search error: {str(e)}"
+
+def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
+    service = get_calendar_service()
+    if not service:
+        return []
+
+    try:
+        now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        calendar_list = service.calendarList().list().execute().get('items', [])
+        if not calendar_list:
+            calendar_list = [{'id': 'primary', 'summary': 'Primary'}]
+
+        all_events = []
+        for cal in calendar_list:
+            cal_id = cal.get('id')
+            cal_name = cal.get('summary', 'Calendar')
+
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=now,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+
+                for item in events_result.get('items', []):
+                    start_val = item.get('start', {}).get('dateTime', item.get('start', {}).get('date'))
+                    all_events.append({
+                        'calendar': cal_name,
+                        'summary': item.get('summary', 'Untitled Event'),
+                        'start': start_val,
+                        'id': item.get('id')
+                    })
+            except Exception:
+                continue
+
+        all_events.sort(key=lambda x: x['start'] if x['start'] else "")
+        return all_events[:max_results]
+    except Exception:
+        return []
+
+def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
+    events = fetch_raw_calendar_events(time_min_iso, max_results)
+    if not events:
+        return "No upcoming events found on connected calendars or integration is inactive."
+    result = [f"- [{e['calendar']}] {e['summary']} (Starts: {e['start']}, ID: {e['id']})" for e in events]
+    return "\n".join(result)
+
+def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
+    service = get_calendar_service()
+    if not service:
+        return "Google Calendar integration is not active or credentials are missing."
+    try:
+        event = {
+            'summary': summary,
+            'description': description,
+            'start': {'dateTime': start_time_iso},
+            'end': {'dateTime': end_time_iso},
+        }
+        created = service.events().insert(calendarId='primary', body=event).execute()
+        return f"Event created successfully: '{created.get('summary')}' (ID: {created.get('id')})"
+    except Exception as err:
+        return f"Error creating event: {str(err)}"
+
+def update_calendar_event(event_id: str, summary: Optional[str] = None, start_time_iso: Optional[str] = None, end_time_iso: Optional[str] = None) -> str:
+    service = get_calendar_service()
+    if not service:
+        return "Google Calendar integration is not active or credentials are missing."
+    try:
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+        if summary:
+            event['summary'] = summary
+        if start_time_iso:
+            event['start'] = {'dateTime': start_time_iso}
+        if end_time_iso:
+            event['end'] = {'dateTime': end_time_iso}
+        updated = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
+        return f"Event updated successfully: '{updated.get('summary')}'"
+    except Exception as err:
+        return f"Error updating event: {str(err)}"
+
+def delete_calendar_event(event_id: str) -> str:
+    service = get_calendar_service()
+    if not service:
+        return "Google Calendar integration is not active or credentials are missing."
+    try:
+        service.events().delete(calendarId='primary', eventId=event_id).execute()
+        return f"Event {event_id} deleted successfully."
+    except Exception as err:
+        return f"Error deleting event: {str(err)}"
 
 # ==============================================================================
 # GitHub Integration Tools
@@ -429,118 +539,6 @@ def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
         return f"Failed to create issue: {str(e)}"
 
 # ==============================================================================
-# Live Web Search & Google Calendar
-# ==============================================================================
-
-def web_search_tool(query: str, max_results: int = 5) -> str:
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-            if not results:
-                return f"No results found for search query: '{query}'"
-            
-            output = []
-            for r in results:
-                title = r.get("title", "Untitled")
-                body = r.get("body", "No description.")
-                href = r.get("href", "")
-                output.append(f"Title: {title}\nSnippet: {body}\nURL: {href}")
-            return "\n\n".join(output)
-    except Exception as e:
-        return f"Web search error: {str(e)}"
-
-def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
-    service = get_calendar_service()
-    if not service:
-        return []
-
-    try:
-        now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
-        calendar_list = service.calendarList().list().execute().get('items', [])
-        if not calendar_list:
-            calendar_list = [{'id': 'primary', 'summary': 'Primary'}]
-
-        all_events = []
-        for cal in calendar_list:
-            cal_id = cal.get('id')
-            cal_name = cal.get('summary', 'Calendar')
-
-            try:
-                events_result = service.events().list(
-                    calendarId=cal_id,
-                    timeMin=now,
-                    maxResults=max_results,
-                    singleEvents=True,
-                    orderBy='startTime'
-                ).execute()
-
-                for item in events_result.get('items', []):
-                    start_val = item.get('start', {}).get('dateTime', item.get('start', {}).get('date'))
-                    all_events.append({
-                        'calendar': cal_name,
-                        'summary': item.get('summary', 'Untitled Event'),
-                        'start': start_val,
-                        'id': item.get('id')
-                    })
-            except Exception:
-                continue
-
-        all_events.sort(key=lambda x: x['start'] if x['start'] else "")
-        return all_events[:max_results]
-    except Exception:
-        return []
-
-def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
-    events = fetch_raw_calendar_events(time_min_iso, max_results)
-    if not events:
-        return "No upcoming events found on connected calendars or integration is inactive."
-    result = [f"- [{e['calendar']}] {e['summary']} (Starts: {e['start']}, ID: {e['id']})" for e in events]
-    return "\n".join(result)
-
-def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
-    service = get_calendar_service()
-    if not service:
-        return "Google Calendar integration is not active or credentials are missing."
-    try:
-        event = {
-            'summary': summary,
-            'description': description,
-            'start': {'dateTime': start_time_iso},
-            'end': {'dateTime': end_time_iso},
-        }
-        created = service.events().insert(calendarId='primary', body=event).execute()
-        return f"Event created successfully: '{created.get('summary')}' (ID: {created.get('id')})"
-    except Exception as err:
-        return f"Error creating event: {str(err)}"
-
-def update_calendar_event(event_id: str, summary: Optional[str] = None, start_time_iso: Optional[str] = None, end_time_iso: Optional[str] = None) -> str:
-    service = get_calendar_service()
-    if not service:
-        return "Google Calendar integration is not active or credentials are missing."
-    try:
-        event = service.events().get(calendarId='primary', eventId=event_id).execute()
-        if summary:
-            event['summary'] = summary
-        if start_time_iso:
-            event['start'] = {'dateTime': start_time_iso}
-        if end_time_iso:
-            event['end'] = {'dateTime': end_time_iso}
-        updated = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
-        return f"Event updated successfully: '{updated.get('summary')}'"
-    except Exception as err:
-        return f"Error updating event: {str(err)}"
-
-def delete_calendar_event(event_id: str) -> str:
-    service = get_calendar_service()
-    if not service:
-        return "Google Calendar integration is not active or credentials are missing."
-    try:
-        service.events().delete(calendarId='primary', eventId=event_id).execute()
-        return f"Event {event_id} deleted successfully."
-    except Exception as err:
-        return f"Error deleting event: {str(err)}"
-
-# ==============================================================================
 # Reservation & Schedule Conflict Engine
 # ==============================================================================
 
@@ -609,10 +607,68 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
     )
 
 # ==============================================================================
+# Composite Executive Briefing Engine
+# ==============================================================================
+
+def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
+    """
+    Executes a comprehensive morning briefing:
+    1. Local weather lookup via live search.
+    2. Inbox triage for unread Gmail messages.
+    3. Calendar & Canvas schedule for today & tomorrow.
+    """
+    now = datetime.datetime.now()
+    today_str = now.strftime("%A, %B %d, %Y")
+    
+    # 1. Weather
+    weather_intel = web_search_tool(f"current weather today in {location}", max_results=2)
+
+    # 2. Gmail Unread Triage
+    gmail_intel = gmail_search_messages(query="is:unread", max_results=5)
+
+    # 3. Schedule & Canvas Agenda
+    # Look from beginning of current day to 48 hours forward
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone().isoformat()
+    agenda_events = fetch_raw_calendar_events(time_min_iso=start_of_day, max_results=15)
+
+    agenda_lines = []
+    if agenda_events:
+        for ev in agenda_events:
+            cal_label = ev.get("calendar", "Calendar")
+            summary = ev.get("summary", "Event")
+            start = ev.get("start", "")
+            agenda_lines.append(f"- [{cal_label}] {summary} at {start}")
+        agenda_block = "\n".join(agenda_lines)
+    else:
+        agenda_block = "No events, deadlines, or exams scheduled for the next 48 hours."
+
+    report = (
+        f"=== EXECUTIVE BRIEFING FOR {today_str.upper()} ===\n\n"
+        f"[LOCAL WEATHER - {location.upper()}]\n{weather_intel}\n\n"
+        f"[ACTIONABLE INBOX // UNREAD GMAIL]\n{gmail_intel}\n\n"
+        f"[CANVAS & SCHEDULE // NEXT 48 HOURS]\n{agenda_block}\n\n"
+        f"=== END OF BRIEFING DATA ==="
+    )
+    return report
+
+# ==============================================================================
 # Tool Schema Declarations & Dispatch
 # ==============================================================================
 
 tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "executive_briefing_tool",
+            "description": "Compiles a complete morning briefing chaining live weather, unread emails from Gmail, and upcoming Canvas & Google Calendar events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City and state for weather lookup (default 'Philadelphia, PA')."}
+                }
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -863,6 +919,7 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "executive_briefing_tool": executive_briefing_tool,
     "gmail_search_messages": gmail_search_messages,
     "gmail_read_message": gmail_read_message,
     "gmail_create_draft": gmail_create_draft,
@@ -977,17 +1034,18 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
         "You have direct execution powers over:\n"
-        "1. GMAIL INTEGRATION: Use gmail_search_messages, gmail_read_message, and gmail_create_draft. "
-        "When asked about emails or inbox, search matching threads, summarize them, and draft replies when requested.\n"
-        "2. RESERVATIONS & BOOKINGS: check_schedule_conflict and restaurant_reservation_tool.\n"
-        "3. GITHUB: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
-        "4. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
-        "5. LIVE WEB SEARCH: web_search_tool.\n"
-        "6. MEMORY: save_fact_tool.\n\n"
+        "1. EXECUTIVE BRIEFINGS: Use executive_briefing_tool whenever the user asks for a morning briefing, daily briefing, status report, or overall update. "
+        "Synthesize the briefing crisply, highlighting today's weather, actionable unread emails, and today's schedule/deadlines.\n"
+        "2. GMAIL INTEGRATION: gmail_search_messages, gmail_read_message, gmail_create_draft.\n"
+        "3. RESERVATIONS & BOOKINGS: check_schedule_conflict and restaurant_reservation_tool.\n"
+        "4. GITHUB: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
+        "5. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
+        "6. LIVE WEB SEARCH: web_search_tool.\n"
+        "7. PERMANENT MEMORY: save_fact_tool.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
-        "- When executing multi-turn tool commands, chain all necessary actions before finalizing the response."
+        "- Synthesize briefing results into an authoritative executive summary formatted cleanly for reading and natural vocal playback."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1052,7 +1110,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 })
 
         if not reply_text:
-            reply_text = "Directive executed successfully."
+            reply_text = "Briefing compiled successfully."
 
     except Exception as e:
         reply_text = f"ARGUS backend error: {str(e)}"
