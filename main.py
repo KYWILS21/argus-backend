@@ -37,9 +37,13 @@ DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
 
+CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://temple.instructure.com").rstrip("/")
+CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "")
+CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "")
+
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.6.0")
+app = FastAPI(title="ARGUS API", version="2.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -233,11 +237,169 @@ def get_gmail_service():
         return None
 
 # ==============================================================================
+# Canvas REST API Client & Tools (Token + Session Cookie Fallback)
+# ==============================================================================
+
+def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
+    if not CANVAS_API_TOKEN and not CANVAS_SESSION_COOKIE:
+        raise ValueError("Neither CANVAS_API_TOKEN nor CANVAS_SESSION_COOKIE is configured in Railway environment variables.")
+
+    clean_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    url = f"{CANVAS_BASE_URL}/api/v1{clean_endpoint}"
+    
+    data_bytes = json.dumps(payload).encode("utf-8") if payload else None
+    req = urllib.request.Request(url, data=data_bytes, method=method)
+    
+    if CANVAS_API_TOKEN:
+        req.add_header("Authorization", f"Bearer {CANVAS_API_TOKEN}")
+    elif CANVAS_SESSION_COOKIE:
+        clean_cookie = CANVAS_SESSION_COOKIE.strip().strip('"').strip("'")
+        req.add_header("Cookie", clean_cookie)
+
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    if payload:
+        req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            content = resp.read().decode("utf-8")
+            return json.loads(content) if content else {}
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8")
+        raise RuntimeError(f"Canvas API HTTP {e.code}: {err_msg}")
+
+def canvas_list_courses() -> str:
+    """Lists currently active enrolled courses, course names, codes, and IDs."""
+    try:
+        courses = _canvas_api_request("/courses?enrollment_state=active&include[]=term")
+        if not courses:
+            return "No active enrolled courses found on Canvas."
+
+        output = []
+        for c in courses:
+            c_id = c.get("id")
+            c_name = c.get("name") or c.get("course_code") or "Untitled Course"
+            c_code = c.get("course_code", "")
+            term = c.get("term", {}).get("name", "Current Term")
+            output.append(f"- [{c_id}] {c_name} (Code: {c_code}, Term: {term})")
+        return "\n".join(output)
+    except Exception as e:
+        return f"Failed to list Canvas courses: {str(e)}"
+
+def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = None) -> str:
+    """
+    Fetches assignments for a course with full details, descriptions, 
+    and grading rubric criteria.
+    """
+    try:
+        endpoint = f"/courses/{course_id}/assignments?include[]=rubric&order_by=due_at"
+        assignments = _canvas_api_request(endpoint)
+        if not assignments:
+            return f"No assignments found for course ID {course_id}."
+
+        matches = []
+        for a in assignments:
+            title = a.get("name", "Untitled")
+            if search_query and search_query.lower() not in title.lower():
+                continue
+
+            a_id = a.get("id")
+            due_at = a.get("due_at", "No due date specified")
+            points = a.get("points_possible", "N/A")
+            desc_raw = a.get("description", "") or "No description provided."
+            clean_desc = desc_raw.replace("<p>", "").replace("</p>", "\n").replace("<br>", "\n").replace("<br/>", "\n")
+            clean_desc = clean_desc[:600]
+
+            rubric = a.get("rubric", [])
+            rubric_details = []
+            if rubric:
+                for crit in rubric:
+                    c_desc = crit.get("description", "Criterion")
+                    c_pts = crit.get("points", 0)
+                    ratings = [f"{r.get('description', '')} ({r.get('points')} pts)" for r in crit.get("ratings", [])]
+                    rubric_details.append(f"  * {c_desc} [Max: {c_pts} pts]: {', '.join(ratings)}")
+                rubric_block = "\n".join(rubric_details)
+            else:
+                rubric_block = "  No structured rubric attached to this assignment."
+
+            matches.append(
+                f"=== ASSIGNMENT: {title} (ID: {a_id}) ===\n"
+                f"Due Date: {due_at}\n"
+                f"Points Possible: {points}\n"
+                f"Description Snippet:\n{clean_desc.strip()}\n\n"
+                f"Grading Rubric:\n{rubric_block}\n"
+            )
+
+        if not matches:
+            return f"No assignments matched '{search_query}' in course {course_id}."
+
+        return "\n\n".join(matches[:4])
+    except Exception as e:
+        return f"Failed to fetch Canvas rubric: {str(e)}"
+
+def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = None) -> str:
+    """
+    Checks assignment submissions, grades, rubric evaluations, 
+    and instructor feedback comments.
+    """
+    try:
+        if assignment_id:
+            endpoint = f"/courses/{course_id}/assignments/{assignment_id}/submissions/self?include[]=submission_comments&include[]=rubric_assessment"
+            sub = _canvas_api_request(endpoint)
+            submissions = [sub] if sub else []
+        else:
+            endpoint = f"/courses/{course_id}/students/submissions/self?include[]=assignment&include[]=submission_comments&include[]=rubric_assessment&per_page=15"
+            submissions = _canvas_api_request(endpoint)
+
+        if not submissions:
+            return f"No submissions found for course {course_id}."
+
+        results = []
+        for s in submissions:
+            a_info = s.get("assignment", {})
+            a_name = a_info.get("name") or f"Assignment #{s.get('assignment_id')}"
+            state = s.get("workflow_state", "unsubmitted")
+            score = s.get("score")
+            grade = s.get("grade")
+            sub_at = s.get("submitted_at") or "Not submitted"
+
+            comments = []
+            for c in s.get("submission_comments", []):
+                author = c.get("author_name", "Instructor")
+                comment_text = c.get("comment", "")
+                comments.append(f"  * [{author}]: {comment_text}")
+            comment_block = "\n".join(comments) if comments else "  No instructor comments."
+
+            rubric_assess = s.get("rubric_assessment", {})
+            rubric_eval = []
+            if rubric_assess:
+                for crit_id, eval_data in rubric_assess.items():
+                    r_pts = eval_data.get("points")
+                    r_comments = eval_data.get("comments", "")
+                    rubric_eval.append(f"  * Criterion {crit_id}: {r_pts} pts - {r_comments}")
+                rubric_eval_block = "\n".join(rubric_eval)
+            else:
+                rubric_eval_block = "  No rubric breakdown evaluated."
+
+            results.append(
+                f"=== {a_name} ===\n"
+                f"Status: {state.upper()}\n"
+                f"Score: {score} | Grade: {grade}\n"
+                f"Submitted At: {sub_at}\n"
+                f"Instructor Comments:\n{comment_block}\n"
+                f"Rubric Assessment:\n{rubric_eval_block}\n"
+            )
+
+        return "\n".join(results[:5])
+    except Exception as e:
+        return f"Failed to retrieve submission grades: {str(e)}"
+
+# ==============================================================================
 # Gmail Tools
 # ==============================================================================
 
 def gmail_search_messages(query: str = "is:unread", max_results: int = 5) -> str:
-    """Searches Gmail using queries like 'is:unread', 'from:sender', or keywords."""
     service = get_gmail_service()
     if not service:
         return "Gmail integration is not active or Google credentials are missing."
@@ -539,7 +701,7 @@ def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
         return f"Failed to create issue: {str(e)}"
 
 # ==============================================================================
-# Reservation & Schedule Conflict Engine
+# Reservation & Briefing Engines
 # ==============================================================================
 
 def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -> str:
@@ -606,28 +768,13 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
         f"Venue Intel & Phone:\n{search_info}"
     )
 
-# ==============================================================================
-# Composite Executive Briefing Engine
-# ==============================================================================
-
 def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
-    """
-    Executes a comprehensive morning briefing:
-    1. Local weather lookup via live search.
-    2. Inbox triage for unread Gmail messages.
-    3. Calendar & Canvas schedule for today & tomorrow.
-    """
     now = datetime.datetime.now()
     today_str = now.strftime("%A, %B %d, %Y")
     
-    # 1. Weather
     weather_intel = web_search_tool(f"current weather today in {location}", max_results=2)
-
-    # 2. Gmail Unread Triage
     gmail_intel = gmail_search_messages(query="is:unread", max_results=5)
 
-    # 3. Schedule & Canvas Agenda
-    # Look from beginning of current day to 48 hours forward
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone().isoformat()
     agenda_events = fetch_raw_calendar_events(time_min_iso=start_of_day, max_results=15)
 
@@ -642,14 +789,13 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
     else:
         agenda_block = "No events, deadlines, or exams scheduled for the next 48 hours."
 
-    report = (
+    return (
         f"=== EXECUTIVE BRIEFING FOR {today_str.upper()} ===\n\n"
         f"[LOCAL WEATHER - {location.upper()}]\n{weather_intel}\n\n"
         f"[ACTIONABLE INBOX // UNREAD GMAIL]\n{gmail_intel}\n\n"
         f"[CANVAS & SCHEDULE // NEXT 48 HOURS]\n{agenda_block}\n\n"
         f"=== END OF BRIEFING DATA ==="
     )
-    return report
 
 # ==============================================================================
 # Tool Schema Declarations & Dispatch
@@ -659,12 +805,53 @@ tools_schema = [
     {
         "type": "function",
         "function": {
+            "name": "canvas_list_courses",
+            "description": "Lists active enrolled courses on Canvas with their unique Course IDs and terms.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "canvas_get_assignment_rubric",
+            "description": "Retrieves assignment instructions, prompts, points, and grading rubrics for a specific Canvas course.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "course_id": {"type": "string", "description": "The unique numerical Canvas course ID."},
+                    "search_query": {"type": "string", "description": "Optional keyword or assignment title filter (e.g. 'Lab 2', 'Project 1')."}
+                },
+                "required": ["course_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "canvas_get_submission_grades",
+            "description": "Checks student assignment submissions, earned scores, letter grades, rubric evaluation breakdowns, and instructor feedback.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "course_id": {"type": "string", "description": "The numerical Canvas course ID."},
+                    "assignment_id": {"type": "string", "description": "Optional specific numerical assignment ID. If omitted, returns recent submissions."}
+                },
+                "required": ["course_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "executive_briefing_tool",
             "description": "Compiles a complete morning briefing chaining live weather, unread emails from Gmail, and upcoming Canvas & Google Calendar events.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "location": {"type": "string", "description": "City and state for weather lookup (default 'Philadelphia, PA')."}
+                    "location": {"type": "string", "description": "City and state for weather lookup."}
                 }
             }
         }
@@ -673,12 +860,12 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "gmail_search_messages",
-            "description": "Searches the user's Gmail inbox for emails matching a query (e.g. 'is:unread', 'from:professor', 'subject:assignment').",
+            "description": "Searches Gmail for emails matching a query.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Gmail search query syntax (default 'is:unread')."},
-                    "max_results": {"type": "integer", "description": "Maximum emails to return (default 5)."}
+                    "query": {"type": "string", "description": "Gmail search query syntax."},
+                    "max_results": {"type": "integer"}
                 }
             }
         }
@@ -687,11 +874,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "gmail_read_message",
-            "description": "Reads the details and content of a specific email by its message ID.",
+            "description": "Reads details and content of a specific email by its message ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "message_id": {"type": "string", "description": "The Gmail message ID to inspect."}
+                    "message_id": {"type": "string"}
                 },
                 "required": ["message_id"]
             }
@@ -701,13 +888,13 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "gmail_create_draft",
-            "description": "Creates an email draft in the user's Gmail account for them to review or send.",
+            "description": "Creates an email draft in Gmail.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "to_address": {"type": "string", "description": "Recipient email address."},
-                    "subject": {"type": "string", "description": "Subject line."},
-                    "body_text": {"type": "string", "description": "Full text body of the email."}
+                    "to_address": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body_text": {"type": "string"}
                 },
                 "required": ["to_address", "subject", "body_text"]
             }
@@ -717,15 +904,15 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "restaurant_reservation_tool",
-            "description": "Prepares and executes a restaurant reservation. Gathers booking links, checks info, and places a calendar hold.",
+            "description": "Prepares and executes a restaurant reservation.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "restaurant_name": {"type": "string", "description": "Name of the restaurant."},
-                    "location": {"type": "string", "description": "City or neighborhood."},
-                    "party_size": {"type": "integer", "description": "Number of guests."},
-                    "date_str": {"type": "string", "description": "YYYY-MM-DD date format."},
-                    "time_str": {"type": "string", "description": "HH:MM 24-hour time format."}
+                    "restaurant_name": {"type": "string"},
+                    "location": {"type": "string"},
+                    "party_size": {"type": "integer"},
+                    "date_str": {"type": "string"},
+                    "time_str": {"type": "string"}
                 },
                 "required": ["restaurant_name", "location", "party_size", "date_str", "time_str"]
             }
@@ -739,8 +926,8 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target_time_iso": {"type": "string", "description": "Target start time in ISO format."},
-                    "duration_minutes": {"type": "integer", "description": "Duration in minutes."}
+                    "target_time_iso": {"type": "string"},
+                    "duration_minutes": {"type": "integer"}
                 },
                 "required": ["target_time_iso"]
             }
@@ -754,7 +941,7 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Maximum repositories to return."}
+                    "limit": {"type": "integer"}
                 }
             }
         }
@@ -767,9 +954,9 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Repository name."},
-                    "branch": {"type": "string", "description": "Branch name (default 'main')."},
-                    "path_prefix": {"type": "string", "description": "Optional directory filter."}
+                    "repo": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "path_prefix": {"type": "string"}
                 },
                 "required": ["repo"]
             }
@@ -783,9 +970,9 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Repository name."},
-                    "path": {"type": "string", "description": "Path to file inside repo."},
-                    "branch": {"type": "string", "description": "Branch name."}
+                    "repo": {"type": "string"},
+                    "path": {"type": "string"},
+                    "branch": {"type": "string"}
                 },
                 "required": ["repo", "path"]
             }
@@ -795,15 +982,15 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "github_write_file",
-            "description": "Creates a new file or updates an existing file in GitHub with a commit.",
+            "description": "Creates or updates a file in GitHub with a commit.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Repository name."},
-                    "path": {"type": "string", "description": "Path to write or update."},
-                    "content": {"type": "string", "description": "Full file content."},
-                    "commit_message": {"type": "string", "description": "Commit message."},
-                    "branch": {"type": "string", "description": "Target branch."}
+                    "repo": {"type": "string"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "commit_message": {"type": "string"},
+                    "branch": {"type": "string"}
                 },
                 "required": ["repo", "path", "content", "commit_message"]
             }
@@ -817,9 +1004,9 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Repository name."},
-                    "title": {"type": "string", "description": "Issue title."},
-                    "body": {"type": "string", "description": "Issue description."}
+                    "repo": {"type": "string"},
+                    "title": {"type": "string"},
+                    "body": {"type": "string"}
                 },
                 "required": ["repo", "title"]
             }
@@ -829,11 +1016,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "web_search_tool",
-            "description": "Search the live web for current weather, news, facts, documentation, or real-time info.",
+            "description": "Search the live web for real-time info.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query."}
+                    "query": {"type": "string"}
                 },
                 "required": ["query"]
             }
@@ -843,12 +1030,12 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "save_fact_tool",
-            "description": "Permanently save a user fact, preference, rule, or personal detail into long-term memory.",
+            "description": "Permanently save a user fact into long-term memory.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "fact": {"type": "string", "description": "The exact factual information or preference."},
-                    "category": {"type": "string", "description": "Optional category."}
+                    "fact": {"type": "string"},
+                    "category": {"type": "string"}
                 },
                 "required": ["fact"]
             }
@@ -858,12 +1045,12 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "list_calendar_events",
-            "description": "Lists upcoming events across all calendars including Canvas feeds and personal calendar.",
+            "description": "Lists upcoming events across all calendars.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "time_min_iso": {"type": "string", "description": "ISO timestamp."},
-                    "max_results": {"type": "integer", "description": "Max events."}
+                    "time_min_iso": {"type": "string"},
+                    "max_results": {"type": "integer"}
                 }
             }
         }
@@ -872,14 +1059,14 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "create_calendar_event",
-            "description": "Creates a new event on the user's primary calendar.",
+            "description": "Creates a new event on the primary calendar.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "summary": {"type": "string", "description": "Title of the event."},
-                    "start_time_iso": {"type": "string", "description": "Start ISO datetime."},
-                    "end_time_iso": {"type": "string", "description": "End ISO datetime."},
-                    "description": {"type": "string", "description": "Optional description."}
+                    "summary": {"type": "string"},
+                    "start_time_iso": {"type": "string"},
+                    "end_time_iso": {"type": "string"},
+                    "description": {"type": "string"}
                 },
                 "required": ["summary", "start_time_iso", "end_time_iso"]
             }
@@ -893,7 +1080,7 @@ tools_schema = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_id": {"type": "string", "description": "Event ID."},
+                    "event_id": {"type": "string"},
                     "summary": {"type": "string"},
                     "start_time_iso": {"type": "string"},
                     "end_time_iso": {"type": "string"}
@@ -906,11 +1093,11 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "delete_calendar_event",
-            "description": "Deletes an event from the user's primary Google Calendar.",
+            "description": "Deletes an event from the primary Google Calendar.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_id": {"type": "string", "description": "Event ID to delete."}
+                    "event_id": {"type": "string"}
                 },
                 "required": ["event_id"]
             }
@@ -919,6 +1106,9 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "canvas_list_courses": canvas_list_courses,
+    "canvas_get_assignment_rubric": canvas_get_assignment_rubric,
+    "canvas_get_submission_grades": canvas_get_submission_grades,
     "executive_briefing_tool": executive_briefing_tool,
     "gmail_search_messages": gmail_search_messages,
     "gmail_read_message": gmail_read_message,
@@ -1034,18 +1224,20 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
         "You have direct execution powers over:\n"
-        "1. EXECUTIVE BRIEFINGS: Use executive_briefing_tool whenever the user asks for a morning briefing, daily briefing, status report, or overall update. "
-        "Synthesize the briefing crisply, highlighting today's weather, actionable unread emails, and today's schedule/deadlines.\n"
-        "2. GMAIL INTEGRATION: gmail_search_messages, gmail_read_message, gmail_create_draft.\n"
-        "3. RESERVATIONS & BOOKINGS: check_schedule_conflict and restaurant_reservation_tool.\n"
-        "4. GITHUB: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
-        "5. GOOGLE CALENDAR & CANVAS: list_calendar_events, create_calendar_event, etc.\n"
-        "6. LIVE WEB SEARCH: web_search_tool.\n"
-        "7. PERMANENT MEMORY: save_fact_tool.\n\n"
+        "1. CANVAS ACADEMIC SYSTEM: canvas_list_courses, canvas_get_assignment_rubric, and canvas_get_submission_grades. "
+        "When the user asks about an assignment or rubric, first list or identify the course ID, then retrieve the criteria breakdown. "
+        "When asked about scores or grades, inspect recent submissions and feedback.\n"
+        "2. EXECUTIVE BRIEFINGS: executive_briefing_tool.\n"
+        "3. GMAIL INTEGRATION: gmail_search_messages, gmail_read_message, gmail_create_draft.\n"
+        "4. RESERVATIONS & BOOKINGS: check_schedule_conflict and restaurant_reservation_tool.\n"
+        "5. GITHUB: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
+        "6. GOOGLE CALENDAR: list_calendar_events, create_calendar_event, etc.\n"
+        "7. LIVE WEB SEARCH: web_search_tool.\n"
+        "8. PERMANENT MEMORY: save_fact_tool.\n\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
-        "- Synthesize briefing results into an authoritative executive summary formatted cleanly for reading and natural vocal playback."
+        "- Chain multi-step tool calls seamlessly before returning the final report."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1110,7 +1302,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 })
 
         if not reply_text:
-            reply_text = "Briefing compiled successfully."
+            reply_text = "Directive completed successfully."
 
     except Exception as e:
         reply_text = f"ARGUS backend error: {str(e)}"
