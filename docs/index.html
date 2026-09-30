@@ -85,7 +85,13 @@
       box-shadow: 0 0 8px var(--cyan-glow);
     }
 
-    /* Device Selector Dropdown */
+    .status-tag.wake-active {
+      border-color: var(--alert-amber);
+      color: var(--alert-amber);
+      background: rgba(255, 184, 77, 0.15);
+      box-shadow: 0 0 8px rgba(255, 184, 77, 0.4);
+    }
+
     .mic-select {
       background: rgba(4, 14, 28, 0.95);
       border: 1px solid var(--cyan-dim);
@@ -448,17 +454,6 @@
       pointer-events: auto;
     }
 
-    @media (max-width: 850px) {
-      main {
-        grid-template-columns: 1fr;
-        grid-template-rows: 350px 1fr;
-      }
-      .hud-drawer {
-        width: 100vw;
-        right: -100vw;
-      }
-    }
-
     @keyframes spinClockwise {
       100% { transform: rotate(360deg); }
     }
@@ -484,6 +479,7 @@
     <div class="brand-title">A.R.G.U.S. // PROTOCOL</div>
     <div class="status-panel">
       <select id="mic-select" class="mic-select" title="Select audio input hardware"></select>
+      <div id="btn-wake-word" class="status-tag wake-active" title="Toggle passive 'ARGUS' wake-word detection">WAKE: ARGUS</div>
       <div id="btn-toggle-input" class="status-tag" title="Toggle optional keyboard input">KEYBOARD</div>
       <div id="btn-agenda" class="status-tag" title="View Canvas & Calendar Agenda">AGENDA // CANV</div>
       <div id="btn-memory" class="status-tag" title="Open Long-Term Memory Bank">MEMORY BANK</div>
@@ -495,7 +491,7 @@
 
   <main>
     <div class="left-hud">
-      <div id="reactor-box" class="arc-reactor-box" title="Click core to toggle audio transmission">
+      <div id="reactor-box" class="arc-reactor-box" title="Click core or say 'ARGUS' to transmit">
         <div class="outer-ring"></div>
         <div class="inner-ring"></div>
         <div class="reactor-core"></div>
@@ -503,7 +499,7 @@
 
       <div class="visualizer-container">
         <canvas id="visualizer-canvas" width="340" height="85"></canvas>
-        <div id="voice-label" class="core-label">CLICK ARC CORE TO TRANSMIT</div>
+        <div id="voice-label" class="core-label">SAY "ARGUS" OR CLICK CORE</div>
       </div>
     </div>
 
@@ -516,7 +512,7 @@
       <div id="terminal-logs" class="terminal-logs">
         <div class="log-line">
           <span class="log-sender">ARGUS</span>
-          <span class="log-content">System online. Select your microphone from the top bar, then click the Arc Reactor to transmit.</span>
+          <span class="log-content">Protocol initialized. Passive wake-word engine active. Say "ARGUS" at any time to issue directives.</span>
         </div>
       </div>
     </div>
@@ -545,6 +541,7 @@
       const API_BASE = "https://argus-backend-production-e7bd.up.railway.app";
       let authToken = localStorage.getItem("argus_auth_bearer") || "default_secret_token";
       let ttsEnabled = localStorage.getItem("argus_tts_enabled") !== "false";
+      let wakeWordEnabled = localStorage.getItem("argus_wake_enabled") !== "false";
 
       let mediaRecorder = null;
       let audioChunks = [];
@@ -559,6 +556,10 @@
       let audioSource = null;
       let animFrameId = null;
 
+      // Wake-word recognition instance
+      let wakeRecognizer = null;
+      let isWakeListening = false;
+
       const terminal = document.getElementById("terminal-logs");
       const promptInput = document.getElementById("prompt-input");
       const execBtn = document.getElementById("exec-btn");
@@ -568,6 +569,7 @@
       const statusKey = document.getElementById("status-key");
       const statusTts = document.getElementById("status-tts");
       const micSelect = document.getElementById("mic-select");
+      const btnWakeWord = document.getElementById("btn-wake-word");
       
       const btnToggleInput = document.getElementById("btn-toggle-input");
       const optionalPromptDock = document.getElementById("optional-prompt-dock");
@@ -588,6 +590,24 @@
 
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
       canvas.height = canvas.clientHeight * window.devicePixelRatio || 85;
+
+      // Synth Chime (Audio Cues)
+      function playChime(freq = 880, type = "sine", duration = 0.12) {
+        try {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          const ctx = new AudioContextClass();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = type;
+          osc.frequency.setValueAtTime(freq, ctx.currentTime);
+          gain.gain.setValueAtTime(0.08, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          osc.stop(ctx.currentTime + duration);
+        } catch (e) {}
+      }
 
       // Populate Audio Input Devices
       async function populateMicrophones() {
@@ -616,12 +636,13 @@
       micSelect.addEventListener("change", () => {
         selectedDeviceId = micSelect.value;
         localStorage.setItem("argus_mic_id", selectedDeviceId);
-        appendLog("SYSTEM", `Active mic switched to: ${micSelect.options[micSelect.selectedIndex].text}`, "system");
+        appendLog("SYSTEM", `Active mic: ${micSelect.options[micSelect.selectedIndex].text}`, "system");
+        if (isWakeListening) restartWakeWordEngine();
       });
 
-      // Initial query for mic list
       populateMicrophones();
 
+      // UI Toggles
       btnToggleInput.addEventListener("click", () => {
         optionalPromptDock.classList.toggle("visible");
         btnToggleInput.classList.toggle("active");
@@ -647,6 +668,30 @@
         if (!ttsEnabled && window.speechSynthesis) {
           window.speechSynthesis.cancel();
           reactorBox.classList.remove("speaking");
+        }
+      });
+
+      function updateWakeUi() {
+        if (wakeWordEnabled) {
+          btnWakeWord.textContent = "WAKE: ARGUS";
+          btnWakeWord.classList.add("wake-active");
+        } else {
+          btnWakeWord.textContent = "WAKE: OFF";
+          btnWakeWord.classList.remove("wake-active");
+        }
+      }
+      updateWakeUi();
+
+      btnWakeWord.addEventListener("click", () => {
+        wakeWordEnabled = !wakeWordEnabled;
+        localStorage.setItem("argus_wake_enabled", wakeWordEnabled);
+        updateWakeUi();
+        if (wakeWordEnabled) {
+          startWakeWordEngine();
+          appendLog("SYSTEM", "Wake-word detection engaged: listening for 'ARGUS'...", "system");
+        } else {
+          stopWakeWordEngine();
+          appendLog("SYSTEM", "Wake-word detection disengaged.", "system");
         }
       });
 
@@ -839,7 +884,7 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // Visualizer with Active Input Measurement
+      // Visualizer
       function initVisualizer(clonedStream) {
         if (!audioCtx) {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -948,12 +993,12 @@
 
         utterance.onend = () => {
           reactorBox.classList.remove("speaking");
-          voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
+          voiceLabel.textContent = wakeWordEnabled ? 'SAY "ARGUS" OR CLICK CORE' : "CLICK ARC CORE TO TRANSMIT";
         };
 
         utterance.onerror = () => {
           reactorBox.classList.remove("speaking");
-          voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
+          voiceLabel.textContent = wakeWordEnabled ? 'SAY "ARGUS" OR CLICK CORE' : "CLICK ARC CORE TO TRANSMIT";
         };
 
         window.speechSynthesis.speak(utterance);
@@ -1008,141 +1053,235 @@
         }
       }
 
-      // Audio Recording Pipeline with Explicit Device Constraint
-      async function toggleVoiceRecording() {
+      // Audio Recording Pipeline
+      async function startRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone access requires HTTPS.", "error");
           return;
         }
 
+        // Barge-in: cut off any speaking TTS immediately
         if (window.speechSynthesis) window.speechSynthesis.cancel();
         reactorBox.classList.remove("speaking");
 
-        if (!isRecording) {
-          try {
-            const audioConstraints = {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true
-            };
+        // Temporarily pause passive wake recognizer to avoid resource lock
+        stopWakeWordEngine();
 
-            if (selectedDeviceId) {
-              audioConstraints.deviceId = { exact: selectedDeviceId };
+        try {
+          const audioConstraints = {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          };
+
+          if (selectedDeviceId) {
+            audioConstraints.deviceId = { exact: selectedDeviceId };
+          }
+
+          activeStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+          populateMicrophones();
+
+          visualizerStream = activeStream.clone();
+          initVisualizer(visualizerStream);
+
+          let selectedMime = "audio/webm;codecs=opus";
+          if (!MediaRecorder.isTypeSupported(selectedMime)) {
+            if (MediaRecorder.isTypeSupported("audio/webm")) {
+              selectedMime = "audio/webm";
+            } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
+              selectedMime = "audio/mp4";
+            } else {
+              selectedMime = "";
+            }
+          }
+
+          mediaRecorder = selectedMime 
+            ? new MediaRecorder(activeStream, { mimeType: selectedMime, audioBitsPerSecond: 128000 })
+            : new MediaRecorder(activeStream);
+
+          audioChunks = [];
+          recordingStartTime = Date.now();
+
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) {
+              audioChunks.push(e.data);
+            }
+          };
+
+          mediaRecorder.onstop = async () => {
+            if (visualizerStream) {
+              visualizerStream.getTracks().forEach(t => t.stop());
+              visualizerStream = null;
+            }
+            if (audioSource) {
+              audioSource.disconnect();
+              audioSource = null;
+            }
+            if (activeStream) {
+              activeStream.getTracks().forEach(t => t.stop());
+              activeStream = null;
             }
 
-            activeStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+            const actualType = mediaRecorder.mimeType || "audio/webm";
+            const audioBlob = new Blob(audioChunks, { type: actualType });
+            const durationSec = ((Date.now() - recordingStartTime) / 1000).toFixed(1);
 
-            // Refresh microphone list now that permission is granted (revealing real names)
-            populateMicrophones();
+            appendLog("SYSTEM", `Captured ${audioBlob.size} bytes over ${durationSec}s.`, "system");
 
-            visualizerStream = activeStream.clone();
-            initVisualizer(visualizerStream);
+            if (audioBlob.size < 1500) {
+              appendLog("SYSTEM", "Sample contained no audio payload frames. Speak a full command before stopping.", "system");
+              voiceLabel.textContent = wakeWordEnabled ? 'SAY "ARGUS" OR CLICK CORE' : "CLICK ARC CORE TO TRANSMIT";
+              if (statusTools) statusTools.textContent = "SYSTEM IDLE";
+              if (wakeWordEnabled) startWakeWordEngine();
+              return;
+            }
 
-            let selectedMime = "audio/webm;codecs=opus";
-            if (!MediaRecorder.isTypeSupported(selectedMime)) {
-              if (MediaRecorder.isTypeSupported("audio/webm")) {
-                selectedMime = "audio/webm";
-              } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
-                selectedMime = "audio/mp4";
+            voiceLabel.textContent = "TRANSCRIBING AUDIO...";
+            if (statusTools) statusTools.textContent = "WHISPER TRANSCRIBING...";
+
+            const ext = actualType.includes("mp4") ? "m4a" : "webm";
+            const formData = new FormData();
+            formData.append("file", audioBlob, `speech.${ext}`);
+
+            try {
+              const res = await fetch(`${API_BASE}/transcribe`, {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${authToken.trim()}` },
+                body: formData
+              });
+
+              if (res.status === 403) {
+                throw new Error("403 Forbidden: Bearer token rejected. Click [SET AUTH TOKEN].");
+              }
+
+              if (!res.ok) {
+                const errorPayload = await res.json().catch(() => ({}));
+                throw new Error(errorPayload.detail || `HTTP ${res.status}`);
+              }
+
+              const data = await res.json();
+              if (data.text && data.text.trim()) {
+                sendDirective(data.text);
               } else {
-                selectedMime = "";
+                appendLog("SYSTEM", "Whisper completed: No clear speech recognized.", "system");
               }
+            } catch (err) {
+              appendLog("ERROR", `Transcription failed: ${err.message}`, "error");
+            } finally {
+              voiceLabel.textContent = wakeWordEnabled ? 'SAY "ARGUS" OR CLICK CORE' : "CLICK ARC CORE TO TRANSMIT";
+              if (statusTools) statusTools.textContent = "SYSTEM IDLE";
+              if (wakeWordEnabled) startWakeWordEngine();
             }
+          };
 
-            mediaRecorder = selectedMime 
-              ? new MediaRecorder(activeStream, { mimeType: selectedMime, audioBitsPerSecond: 128000 })
-              : new MediaRecorder(activeStream);
+          mediaRecorder.start();
+          isRecording = true;
+          reactorBox.classList.add("recording");
+          voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
+          playChime(1046, "sine", 0.15); // High affirmation ping (C6)
 
-            audioChunks = [];
-            recordingStartTime = Date.now();
-
-            mediaRecorder.ondataavailable = (e) => {
-              if (e.data && e.data.size > 0) {
-                audioChunks.push(e.data);
-              }
-            };
-
-            mediaRecorder.onstop = async () => {
-              if (visualizerStream) {
-                visualizerStream.getTracks().forEach(t => t.stop());
-                visualizerStream = null;
-              }
-              if (audioSource) {
-                audioSource.disconnect();
-                audioSource = null;
-              }
-              if (activeStream) {
-                activeStream.getTracks().forEach(t => t.stop());
-                activeStream = null;
-              }
-
-              const actualType = mediaRecorder.mimeType || "audio/webm";
-              const audioBlob = new Blob(audioChunks, { type: actualType });
-              const durationSec = ((Date.now() - recordingStartTime) / 1000).toFixed(1);
-
-              appendLog("SYSTEM", `Captured ${audioBlob.size} bytes (${audioChunks.length} chunks) over ${durationSec}s.`, "system");
-
-              if (audioBlob.size < 1500) {
-                appendLog("SYSTEM", "Sample contained no audio payload frames. Speak a full command before stopping.", "system");
-                voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
-                if (statusTools) statusTools.textContent = "SYSTEM IDLE";
-                return;
-              }
-
-              voiceLabel.textContent = "TRANSCRIBING AUDIO...";
-              if (statusTools) statusTools.textContent = "WHISPER TRANSCRIBING...";
-
-              const ext = actualType.includes("mp4") ? "m4a" : "webm";
-              const formData = new FormData();
-              formData.append("file", audioBlob, `speech.${ext}`);
-
-              try {
-                const res = await fetch(`${API_BASE}/transcribe`, {
-                  method: "POST",
-                  headers: { "Authorization": `Bearer ${authToken.trim()}` },
-                  body: formData
-                });
-
-                if (res.status === 403) {
-                  throw new Error("403 Forbidden: Bearer token rejected. Click [SET AUTH TOKEN].");
-                }
-
-                if (!res.ok) {
-                  const errorPayload = await res.json().catch(() => ({}));
-                  throw new Error(errorPayload.detail || `HTTP ${res.status}`);
-                }
-
-                const data = await res.json();
-                if (data.text && data.text.trim()) {
-                  sendDirective(data.text);
-                } else {
-                  appendLog("SYSTEM", "Whisper completed: No clear speech recognized.", "system");
-                }
-              } catch (err) {
-                appendLog("ERROR", `Transcription failed: ${err.message}`, "error");
-              } finally {
-                voiceLabel.textContent = "CLICK ARC CORE TO TRANSMIT";
-                if (statusTools) statusTools.textContent = "SYSTEM IDLE";
-              }
-            };
-
-            mediaRecorder.start();
-            isRecording = true;
-            reactorBox.classList.add("recording");
-            voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
-            appendLog("SYSTEM", "Microphone open. Speak your directive...", "system");
-
-          } catch (err) {
-            appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
-            voiceLabel.textContent = "MIC ACCESS ERROR";
-          }
-        } else {
-          if (mediaRecorder && mediaRecorder.state === "recording") {
-            mediaRecorder.stop();
-          }
-          isRecording = false;
-          reactorBox.classList.remove("recording");
+        } catch (err) {
+          appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
+          voiceLabel.textContent = "MIC ACCESS ERROR";
+          if (wakeWordEnabled) startWakeWordEngine();
         }
+      }
+
+      function stopRecording() {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+          playChime(523, "sine", 0.15); // Low closing ping (C5)
+        }
+        isRecording = false;
+        reactorBox.classList.remove("recording");
+      }
+
+      function toggleVoiceRecording() {
+        if (!isRecording) {
+          startRecording();
+        } else {
+          stopRecording();
+        }
+      }
+
+      // Continuous Wake Word Engine ("ARGUS")
+      function initWakeWordEngine() {
+        const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognitionClass) {
+          appendLog("SYSTEM", "Browser speech recognition API unavailable; wake-word disabled.", "system");
+          wakeWordEnabled = false;
+          updateWakeUi();
+          return;
+        }
+
+        wakeRecognizer = new SpeechRecognitionClass();
+        wakeRecognizer.continuous = true;
+        wakeRecognizer.interimResults = true;
+        wakeRecognizer.lang = "en-US";
+
+        wakeRecognizer.onresult = (event) => {
+          if (isRecording) return;
+
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const transcript = event.results[i][0].transcript.trim().toLowerCase();
+
+            // Match "argus", "argos", or "hey argus"
+            if (transcript.includes("argus") || transcript.includes("argos") || transcript.includes("august")) {
+              appendLog("SYSTEM", `Wake-word triggered ("${transcript}"). Engaging capture...`, "system");
+              wakeRecognizer.stop();
+              startRecording();
+              break;
+            }
+          }
+        };
+
+        wakeRecognizer.onerror = (e) => {
+          if (e.error !== "no-speech" && e.error !== "aborted") {
+            console.warn("Wake recognizer error:", e.error);
+          }
+        };
+
+        wakeRecognizer.onend = () => {
+          isWakeListening = false;
+          // Auto-restart loop if still enabled and not actively recording high-def stream
+          if (wakeWordEnabled && !isRecording) {
+            try {
+              wakeRecognizer.start();
+              isWakeListening = true;
+            } catch (err) {}
+          }
+        };
+      }
+
+      function startWakeWordEngine() {
+        if (!wakeRecognizer) initWakeWordEngine();
+        if (!wakeRecognizer || isWakeListening || isRecording) return;
+        try {
+          wakeRecognizer.start();
+          isWakeListening = true;
+        } catch (e) {}
+      }
+
+      function stopWakeWordEngine() {
+        if (wakeRecognizer && isWakeListening) {
+          try {
+            wakeRecognizer.stop();
+          } catch (e) {}
+          isWakeListening = false;
+        }
+      }
+
+      function restartWakeWordEngine() {
+        stopWakeWordEngine();
+        setTimeout(() => {
+          if (wakeWordEnabled && !isRecording) startWakeWordEngine();
+        }, 200);
+      }
+
+      // Initialize wake word on load
+      initWakeWordEngine();
+      if (wakeWordEnabled) {
+        startWakeWordEngine();
       }
 
       if (execBtn) {
