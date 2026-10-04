@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "ARGUS",
+    "slug": "argus-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow ARGUS to access your microphone for voice directives."
+        }
+      ],
+      "expo-audio"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
+    },
+    "android": {
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
+    }
+  }
+}

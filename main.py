@@ -30,6 +30,7 @@ except ImportError:
 # ==============================================================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
@@ -43,20 +44,30 @@ CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.0")
+app = FastAPI(title="ARGUS API", version="2.8.1")
+
+# ==============================================================================
+# CORS Configuration
+# ==============================================================================
+
+ALLOWED_ORIGINS = [
+    "https://kywils21.github.io",
+    "http://localhost:8081",
+    "http://localhost:3000",
+    "http://localhost:19006",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:3000",
+    "exp://localhost:8081",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-@app.options("/{full_path:path}")
-async def preflight_handler(full_path: str):
-    return {"status": "ok"}
 
 @app.get("/favicon.ico")
 async def favicon():
@@ -1257,7 +1268,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         while turn_count < max_turns:
             turn_count += 1
             response = groq_client.chat.completions.create(
-                model="openai/gpt-oss-20b",
+                model=GROQ_MODEL,
                 messages=messages,
                 tools=tools_schema,
                 tool_choice="auto",
