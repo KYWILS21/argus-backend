@@ -18,7 +18,7 @@ import {
 import * as Speech from 'expo-speech';
 import * as FileSystem from 'expo-file-system';
 
-const API_BASE = "https://argus-backend-production-e7bd.up.railway.app";
+const API_BASE = "https://argus-backend-ojna.onrender.com";
 const AUTH_TOKEN = "default_secret_token"; // Ensure this matches your ARGUS_BEARER_TOKEN
 
 interface LogEntry {
