@@ -30,7 +30,7 @@ except ImportError:
 # ==============================================================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
@@ -44,7 +44,7 @@ CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.2")
+app = FastAPI(title="ARGUS API", version="2.8.3")
 
 # ==============================================================================
 # CORS Configuration
@@ -1248,7 +1248,8 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
-        "- Chain multi-step tool calls seamlessly before returning the final report."
+        "- Chain multi-step tool calls seamlessly before returning the final report.\n"
+        "- When tools return content, read and synthesize the details directly into your response rather than acknowledging completion."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1277,12 +1278,15 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             response_msg = response.choices[0].message
 
+            # If the model produced content without requesting additional tools, complete the turn
             if not response_msg.tool_calls:
                 reply_text = response_msg.content or "Task completed."
                 break
 
+            # Append the assistant's tool-call request directly
             messages.append(response_msg)
 
+            # Execute every tool requested in this turn
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
@@ -1292,6 +1296,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 else:
                     fn_result = f"Error: Function {fn_name} not found."
 
+                # Append tool output back into history for the model to synthesize on the next loop iteration
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
