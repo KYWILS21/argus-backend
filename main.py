@@ -44,7 +44,7 @@ CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.3")
+app = FastAPI(title="ARGUS API", version="2.8.4")
 
 # ==============================================================================
 # CORS Configuration
@@ -1249,7 +1249,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
         "- Chain multi-step tool calls seamlessly before returning the final report.\n"
-        "- When tools return content, read and synthesize the details directly into your response rather than acknowledging completion."
+        "- When tools return content, read and synthesize the full details directly into your text response rather than giving brief completion acknowledgments."
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1278,15 +1278,34 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             response_msg = response.choices[0].message
 
-            # If the model produced content without requesting additional tools, complete the turn
+            # If the model didn't call any tools:
             if not response_msg.tool_calls:
-                reply_text = response_msg.content or "Task completed."
-                break
+                # If it wrote content, save it and complete the turn
+                if response_msg.content and response_msg.content.strip():
+                    reply_text = response_msg.content.strip()
+                    break
+
+                # If it stopped tool calling but left content blank, force a synthesis pass
+                if turn_count > 1:
+                    messages.append({
+                        "role": "user",
+                        "content": "Synthesize and present the full details, rubric, and criteria from the tool results above."
+                    })
+                    final_res = groq_client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=messages,
+                        temperature=0.4
+                    )
+                    reply_text = final_res.choices[0].message.content or "No details returned."
+                    break
+                else:
+                    reply_text = "Task completed."
+                    break
 
             # Append the assistant's tool-call request directly
             messages.append(response_msg)
 
-            # Execute every tool requested in this turn
+            # Execute each requested tool
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
@@ -1296,7 +1315,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 else:
                     fn_result = f"Error: Function {fn_name} not found."
 
-                # Append tool output back into history for the model to synthesize on the next loop iteration
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -1304,7 +1322,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 })
 
         if not reply_text:
-            reply_text = "Directive completed successfully."
+            reply_text = "No output produced from directive."
 
     except Exception as e:
         reply_text = f"ARGUS backend error: {str(e)}"
