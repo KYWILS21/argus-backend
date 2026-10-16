@@ -38,13 +38,13 @@ DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
 
-CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://temple.instructure.com").rstrip("/")
+CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://templeu.instructure.com").rstrip("/")
 CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "")
 CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.1")
+app = FastAPI(title="ARGUS API", version="2.8.2")
 
 # ==============================================================================
 # CORS Configuration
@@ -253,7 +253,7 @@ def get_gmail_service():
 
 def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
     if not CANVAS_API_TOKEN and not CANVAS_SESSION_COOKIE:
-        raise ValueError("Neither CANVAS_API_TOKEN nor CANVAS_SESSION_COOKIE is configured in Railway environment variables.")
+        raise ValueError("Neither CANVAS_API_TOKEN nor CANVAS_SESSION_COOKIE is configured in environment variables.")
 
     clean_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
     url = f"{CANVAS_BASE_URL}/api/v1{clean_endpoint}"
@@ -605,7 +605,7 @@ def delete_calendar_event(event_id: str) -> str:
 
 def _github_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
     if not GITHUB_TOKEN:
-        raise ValueError("GITHUB_TOKEN is not configured in Railway environment variables.")
+        raise ValueError("GITHUB_TOKEN is not configured in environment variables.")
 
     url = f"https://api.github.com{endpoint}"
     data_bytes = json.dumps(payload).encode("utf-8") if payload else None
@@ -1281,21 +1281,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 reply_text = response_msg.content or "Task completed."
                 break
 
-            messages.append({
-                "role": "assistant",
-                "content": response_msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for tc in response_msg.tool_calls
-                ]
-            })
+            messages.append(response_msg)
 
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
