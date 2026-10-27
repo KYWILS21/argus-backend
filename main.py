@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import base64
 import sqlite3
 import datetime
@@ -8,10 +9,11 @@ import urllib.parse
 import urllib.error
 from email.message import EmailMessage
 from typing import Optional, List, Dict, Any
+
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from groq import Groq
+from groq import Groq, RateLimitError
 
 try:
     from ddgs import DDGS
@@ -29,22 +31,22 @@ except ImportError:
 # Configuration & Initialization
 # ==============================================================================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip().strip('"').strip("'")
+ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token").strip()
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21").strip()
 
 CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://templeu.instructure.com").rstrip("/")
-CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "")
-CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "")
+CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "").strip()
+CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "").strip()
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.4")
+app = FastAPI(title="ARGUS API", version="2.8.5")
 
 # ==============================================================================
 # CORS Configuration
@@ -58,11 +60,12 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:8081",
     "http://127.0.0.1:3000",
     "exp://localhost:8081",
+    "*",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -247,6 +250,13 @@ def get_gmail_service():
     except Exception:
         return None
 
+def _normalize_iso_time(time_str: str) -> str:
+    """Ensures ISO string conforms to RFC3339 for Google Calendar API."""
+    clean = time_str.strip().replace(" ", "T")
+    if not clean.endswith("Z") and "+" not in clean[10:] and "-" not in clean[10:]:
+        clean += "-04:00"
+    return clean
+
 # ==============================================================================
 # Canvas REST API Client & Tools (Token + Session Cookie Fallback)
 # ==============================================================================
@@ -320,7 +330,7 @@ def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = N
             points = a.get("points_possible", "N/A")
             desc_raw = a.get("description", "") or "No description provided."
             clean_desc = desc_raw.replace("<p>", "").replace("</p>", "\n").replace("<br>", "\n").replace("<br/>", "\n")
-            clean_desc = clean_desc[:600]
+            clean_desc = clean_desc[:400]
 
             rubric = a.get("rubric", [])
             rubric_details = []
@@ -345,7 +355,7 @@ def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = N
         if not matches:
             return f"No assignments matched '{search_query}' in course {course_id}."
 
-        return "\n\n".join(matches[:4])
+        return "\n\n".join(matches[:3])
     except Exception as e:
         return f"Failed to fetch Canvas rubric: {str(e)}"
 
@@ -360,7 +370,7 @@ def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = 
             sub = _canvas_api_request(endpoint)
             submissions = [sub] if sub else []
         else:
-            endpoint = f"/courses/{course_id}/students/submissions/self?include[]=assignment&include[]=submission_comments&include[]=rubric_assessment&per_page=15"
+            endpoint = f"/courses/{course_id}/students/submissions/self?include[]=assignment&include[]=submission_comments&include[]=rubric_assessment&per_page=10"
             submissions = _canvas_api_request(endpoint)
 
         if not submissions:
@@ -402,7 +412,7 @@ def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = 
                 f"Rubric Assessment:\n{rubric_eval_block}\n"
             )
 
-        return "\n".join(results[:5])
+        return "\n".join(results[:4])
     except Exception as e:
         return f"Failed to retrieve submission grades: {str(e)}"
 
@@ -561,11 +571,14 @@ def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, 
     if not service:
         return "Google Calendar integration is not active or credentials are missing."
     try:
+        formatted_start = _normalize_iso_time(start_time_iso)
+        formatted_end = _normalize_iso_time(end_time_iso)
+
         event = {
             'summary': summary,
-            'description': description,
-            'start': {'dateTime': start_time_iso},
-            'end': {'dateTime': end_time_iso},
+            'description': description or "",
+            'start': {'dateTime': formatted_start},
+            'end': {'dateTime': formatted_end},
         }
         created = service.events().insert(calendarId='primary', body=event).execute()
         return f"Event created successfully: '{created.get('summary')}' (ID: {created.get('id')})"
@@ -581,9 +594,9 @@ def update_calendar_event(event_id: str, summary: Optional[str] = None, start_ti
         if summary:
             event['summary'] = summary
         if start_time_iso:
-            event['start'] = {'dateTime': start_time_iso}
+            event['start'] = {'dateTime': _normalize_iso_time(start_time_iso)}
         if end_time_iso:
-            event['end'] = {'dateTime': end_time_iso}
+            event['end'] = {'dateTime': _normalize_iso_time(end_time_iso)}
         updated = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
         return f"Event updated successfully: '{updated.get('summary')}'"
     except Exception as err:
@@ -654,7 +667,7 @@ def github_get_tree(repo: str, branch: str = "main", path_prefix: Optional[str] 
             item_type = "DIR " if item.get("type") == "tree" else "FILE"
             files.append(f"[{item_type}] {p}")
 
-        return "\n".join(files[:60]) if files else f"No files matching prefix '{path_prefix}'."
+        return "\n".join(files[:40]) if files else f"No files matching prefix '{path_prefix}'."
     except Exception as e:
         return f"Failed to fetch directory tree: {str(e)}"
 
@@ -667,6 +680,9 @@ def github_read_file(repo: str, path: str, branch: str = "main") -> str:
         data = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
         if data.get("encoding") == "base64" and data.get("content"):
             decoded = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+            # Truncate large files to protect token context
+            if len(decoded) > 1500:
+                decoded = decoded[:1500] + "\n...[truncated for token efficiency]..."
             return f"--- Content of {clean_path} ({owner}/{repo}) ---\n{decoded}"
         return f"File found but unexpected encoding or directory: {clean_path}"
     except Exception as e:
@@ -717,7 +733,8 @@ def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
 
 def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -> str:
     try:
-        target_dt = datetime.datetime.fromisoformat(target_time_iso.replace("Z", "+00:00"))
+        normalized = _normalize_iso_time(target_time_iso)
+        target_dt = datetime.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except Exception:
         return "Invalid ISO format for target_time_iso."
 
@@ -744,7 +761,7 @@ def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -
 
 def restaurant_reservation_tool(restaurant_name: str, location: str, party_size: int, date_str: str, time_str: str) -> str:
     search_query = f"{restaurant_name} {location} reservations OpenTable Resy phone address"
-    search_info = web_search_tool(search_query, max_results=4)
+    search_info = web_search_tool(search_query, max_results=3)
 
     encoded_name = urllib.parse.quote(restaurant_name)
     encoded_loc = urllib.parse.quote(location)
@@ -760,7 +777,7 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
         end_iso = dt_end.isoformat()
         
         cal_summary = f"RESERVATION (HOLD): {restaurant_name} (Party of {party_size})"
-        cal_desc = f"Reservation for {party_size} at {restaurant_name}.\nLocation: {location}\nOpenTable: {opentable_link}\nResy: {resy_link}\n\nSearch Intel:\n{search_info[:500]}"
+        cal_desc = f"Reservation for {party_size} at {restaurant_name}.\nLocation: {location}\nOpenTable: {opentable_link}\nResy: {resy_link}\n\nSearch Intel:\n{search_info[:350]}"
         
         cal_result = create_calendar_event(cal_summary, start_iso, end_iso, description=cal_desc)
     except Exception as e:
@@ -776,7 +793,7 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
         f"1. OpenTable: {opentable_link}\n"
         f"2. Resy: {resy_link}\n"
         f"3. Google Maps / Reserve: {google_reserve_link}\n\n"
-        f"Venue Intel & Phone:\n{search_info}"
+        f"Venue Intel:\n{search_info[:400]}"
     )
 
 def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
@@ -784,10 +801,10 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
     today_str = now.strftime("%A, %B %d, %Y")
     
     weather_intel = web_search_tool(f"current weather today in {location}", max_results=2)
-    gmail_intel = gmail_search_messages(query="is:unread", max_results=5)
+    gmail_intel = gmail_search_messages(query="is:unread", max_results=4)
 
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone().isoformat()
-    agenda_events = fetch_raw_calendar_events(time_min_iso=start_of_day, max_results=15)
+    agenda_events = fetch_raw_calendar_events(time_min_iso=start_of_day, max_results=10)
 
     agenda_lines = []
     if agenda_events:
@@ -1153,7 +1170,7 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "ARGUS"}
+    return {"status": "healthy", "service": "ARGUS", "model": GROQ_MODEL}
 
 @app.get("/history/{session_id}")
 def get_session_history(session_id: str, token: str = Depends(verify_token)):
@@ -1228,7 +1245,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
-    history_records = get_history(session_id, limit=20)
+    
+    # Cap conversation history to the last 6 records to stay below token/minute caps
+    history_records = get_history(session_id, limit=6)
     
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -1268,24 +1287,34 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     try:
         while turn_count < max_turns:
             turn_count += 1
-            response = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                tools=tools_schema,
-                tool_choice="auto",
-                temperature=0.4
-            )
+
+            # 429 Exponential Backoff Loop
+            response = None
+            for attempt in range(3):
+                try:
+                    response = groq_client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=messages,
+                        tools=tools_schema,
+                        tool_choice="auto",
+                        temperature=0.4
+                    )
+                    break
+                except RateLimitError as rle:
+                    if attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise rle
 
             response_msg = response.choices[0].message
 
             # If the model didn't call any tools:
             if not response_msg.tool_calls:
-                # If it wrote content, save it and complete the turn
                 if response_msg.content and response_msg.content.strip():
                     reply_text = response_msg.content.strip()
                     break
 
-                # If it stopped tool calling but left content blank, force a synthesis pass
+                # If tool calls finished but reply was blank, prompt a synthesis pass
                 if turn_count > 1:
                     messages.append({
                         "role": "user",
@@ -1302,7 +1331,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = "Task completed."
                     break
 
-            # Append the assistant's tool-call request directly
             messages.append(response_msg)
 
             # Execute each requested tool
@@ -1311,14 +1339,22 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
 
                 if fn_name in tool_dispatch:
-                    fn_result = tool_dispatch[fn_name](**fn_args)
+                    try:
+                        fn_result = tool_dispatch[fn_name](**fn_args)
+                    except Exception as exc:
+                        fn_result = f"Tool execution error: {type(exc).__name__} - {str(exc)}"
                 else:
                     fn_result = f"Error: Function {fn_name} not found."
+
+                # Truncate large tool responses to 1500 chars to avoid token exhaustion
+                trimmed_result = str(fn_result)
+                if len(trimmed_result) > 1500:
+                    trimmed_result = trimmed_result[:1500] + "\n...[truncated for token efficiency]"
 
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": str(fn_result)
+                    "content": trimmed_result
                 })
 
         if not reply_text:
