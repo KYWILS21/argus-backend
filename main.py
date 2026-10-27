@@ -1235,6 +1235,22 @@ async def transcribe_audio(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
 
+@app.options("/chat")
+@app.options("/chat/")
+@app.options("/transcribe")
+@app.options("/transcribe/")
+@app.options("/agenda")
+@app.options("/memories")
+async def cors_preflight_handler():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE, PUT",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
+        }
+    )
+
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
