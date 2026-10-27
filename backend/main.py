@@ -72,6 +72,20 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_cors_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
@@ -1255,39 +1269,28 @@ async def cors_preflight_handler():
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
     if not groq_client:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured in environment.")
+        return ChatResponse(reply="GROQ_API_KEY is not configured on the backend.", session_id=request.session_id or "")
 
     session_id = request.session_id or str(datetime.datetime.now().timestamp())
     
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
     
-    # Cap conversation history to the last 6 records to stay below token/minute caps
+    # Prune history to last 6 entries to prevent token exhaustion
     history_records = get_history(session_id, limit=6)
-    
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
-        "You have direct execution powers over:\n"
-        "1. CANVAS ACADEMIC SYSTEM: canvas_list_courses, canvas_get_assignment_rubric, and canvas_get_submission_grades. "
-        "When the user asks about an assignment or rubric, first list or identify the course ID, then retrieve the criteria breakdown. "
-        "When asked about scores or grades, inspect recent submissions and feedback.\n"
-        "2. EXECUTIVE BRIEFINGS: executive_briefing_tool.\n"
-        "3. GMAIL INTEGRATION: gmail_search_messages, gmail_read_message, gmail_create_draft.\n"
-        "4. RESERVATIONS & BOOKINGS: check_schedule_conflict and restaurant_reservation_tool.\n"
-        "5. GITHUB: github_list_repos, github_get_tree, github_read_file, github_write_file, github_create_issue.\n"
-        "6. GOOGLE CALENDAR: list_calendar_events, create_calendar_event, etc.\n"
-        "7. LIVE WEB SEARCH: web_search_tool.\n"
-        "8. PERMANENT MEMORY: save_fact_tool.\n\n"
+        "You have direct execution powers over Canvas, Gmail, Google Calendar, GitHub, Web Search, and SQLite memory.\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
-        "- Chain multi-step tool calls seamlessly before returning the final report.\n"
-        "- When tools return content, read and synthesize the full details directly into your text response rather than giving brief completion acknowledgments."
+        "- Execute appropriate tools to fulfill the user's intent.\n"
+        "- Always provide a full, structured markdown answer summarizing tool outputs."
     )
 
-    messages = [{"role": "system", "content": system_prompt}]
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     
     for r in history_records:
         role_label = "user" if r["role"] == "user" else "assistant"
@@ -1297,14 +1300,14 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     save_message(session_id, "user", request.message)
 
     reply_text = ""
-    max_turns = 5
+    max_turns = 4
     turn_count = 0
 
     try:
         while turn_count < max_turns:
             turn_count += 1
 
-            # 429 Exponential Backoff Loop
+            # Exponential backoff retry for Groq API calls
             response = None
             for attempt in range(3):
                 try:
@@ -1313,43 +1316,53 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                         messages=messages,
                         tools=tools_schema,
                         tool_choice="auto",
-                        temperature=0.4
+                        temperature=0.3
                     )
                     break
-                except RateLimitError as rle:
+                except RateLimitError:
                     if attempt < 2:
-                        time.sleep(1.5 * (attempt + 1))
+                        time.sleep(2.0 * (attempt + 1))
                         continue
-                    raise rle
+                    return ChatResponse(reply="Groq rate limit exceeded (TPM/RPM ceiling). Please wait a moment and try again.", session_id=session_id)
+                except Exception as api_err:
+                    if attempt < 2 and "429" in str(api_err):
+                        time.sleep(2.0)
+                        continue
+                    return ChatResponse(reply=f"Groq API error: {str(api_err)}", session_id=session_id)
+
+            if not response or not response.choices:
+                break
 
             response_msg = response.choices[0].message
 
-            # If the model didn't call any tools:
+            # If the model produced no tool calls, capture content and finish
             if not response_msg.tool_calls:
-                if response_msg.content and response_msg.content.strip():
-                    reply_text = response_msg.content.strip()
+                content = response_msg.content or ""
+                if content.strip():
+                    reply_text = content.strip()
                     break
 
-                # If synthesis returned empty after executing tools, force a clean completion pass without tools schema:
+                # If content was empty after tools executed, build a prompt that satisfies Groq's message sequence
                 if turn_count > 1:
                     messages.append({
                         "role": "user",
-                        "content": "Please synthesize and present a clear, direct summary of the tool results above."
+                        "content": "Synthesize the results from the tool outputs above into a clear executive summary."
                     })
-                    final_res = groq_client.chat.completions.create(
+                    final_completion = groq_client.chat.completions.create(
                         model=GROQ_MODEL,
                         messages=messages,
                         temperature=0.3
                     )
-                    reply_text = final_res.choices[0].message.content or "Task completed, but no text was generated."
+                    reply_text = final_completion.choices[0].message.content or "Action executed, but no response text was returned."
                     break
                 else:
-                    reply_text = response_msg.content or "Directive executed."
+                    reply_text = "Task executed."
                     break
 
-            messages.append(response_msg)
+            # Convert response message to standard dict structure for context preservation
+            messages.append(response_msg.model_dump())
 
-            # Execute each requested tool
+            # Execute tool calls
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
@@ -1358,14 +1371,14 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     try:
                         fn_result = tool_dispatch[fn_name](**fn_args)
                     except Exception as exc:
-                        fn_result = f"Tool execution error: {type(exc).__name__} - {str(exc)}"
+                        fn_result = f"Tool failure: {type(exc).__name__} - {str(exc)}"
                 else:
-                    fn_result = f"Error: Function {fn_name} not found."
+                    fn_result = f"Error: Tool '{fn_name}' not recognized."
 
-                # Truncate large tool responses to 1500 chars to avoid token exhaustion
+                # Enforce safe character cap per tool payload
                 trimmed_result = str(fn_result)
-                if len(trimmed_result) > 1500:
-                    trimmed_result = trimmed_result[:1500] + "\n...[truncated for token efficiency]"
+                if len(trimmed_result) > 1200:
+                    trimmed_result = trimmed_result[:1200] + "... [truncated to prevent rate limits]"
 
                 messages.append({
                     "role": "tool",
@@ -1374,10 +1387,10 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 })
 
         if not reply_text:
-            reply_text = "No output produced from directive."
+            reply_text = "Task completed, but no text output was generated by the model."
 
     except Exception as e:
-        reply_text = f"ARGUS backend error: {str(e)}"
+        reply_text = f"ARGUS backend runtime exception: {type(e).__name__} - {str(e)}"
 
     save_message(session_id, "assistant", reply_text)
     return ChatResponse(reply=reply_text, session_id=session_id)
