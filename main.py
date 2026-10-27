@@ -10,8 +10,9 @@ import urllib.error
 from email.message import EmailMessage
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Response
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from groq import Groq, RateLimitError
 
@@ -46,22 +47,11 @@ CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "").strip()
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.5")
+app = FastAPI(title="ARGUS API", version="2.8.6")
 
 # ==============================================================================
-# CORS Configuration
+# CORS Configuration & Global Fallbacks
 # ==============================================================================
-
-ALLOWED_ORIGINS = [
-    "https://kywils21.github.io",
-    "http://localhost:8081",
-    "http://localhost:3000",
-    "http://localhost:19006",
-    "http://127.0.0.1:8081",
-    "http://127.0.0.1:3000",
-    "exp://localhost:8081",
-    "*",
-]
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,8 +62,6 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-from fastapi.responses import JSONResponse
-
 @app.exception_handler(Exception)
 async def global_cors_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
@@ -83,6 +71,17 @@ async def global_cors_exception_handler(request: Request, exc: Exception):
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "*",
             "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.options("/{rest_of_path:path}")
+async def cors_preflight_handler(rest_of_path: str):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE, PUT",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
         }
     )
 
@@ -143,66 +142,96 @@ def init_db():
 init_db()
 
 def save_message(session_id: str, role: str, content: str):
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    cursor.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-        (session_id, role, content, now_iso)
-    )
-    conn.commit()
-    conn.close()
+    if not content or not content.strip():
+        return
+    try:
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor.execute(
+            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, role, content.strip(), now_iso)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving message to DB: {e}")
 
-def get_history(session_id: str, limit: int = 20) -> List[Dict[str, str]]:
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-        (session_id, limit)
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+def get_history(session_id: str, limit: int = 6) -> List[Dict[str, str]]:
+    try:
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        valid_history = []
+        for r, c in reversed(rows):
+            clean_content = (c or "").strip()
+            if clean_content and not clean_content.startswith("{") and not clean_content.startswith("["):
+                valid_history.append({"role": r, "content": clean_content})
+        return valid_history
+    except Exception as e:
+        print(f"Error retrieving history: {e}")
+        return []
 
 def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    cursor.execute(
-        "INSERT INTO user_memories (fact, category, created_at) VALUES (?, ?, ?)",
-        (fact, category or "general", now_iso)
-    )
-    conn.commit()
-    conn.close()
-    return f"Successfully saved to permanent memory: '{fact}'"
+    clean_fact = fact.strip()
+    if not clean_fact:
+        return "Cannot save empty fact."
+    try:
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor.execute(
+            "INSERT INTO user_memories (fact, category, created_at) VALUES (?, ?, ?)",
+            (clean_fact, category or "general", now_iso)
+        )
+        conn.commit()
+        conn.close()
+        return f"Successfully saved to permanent memory: '{clean_fact}'"
+    except Exception as e:
+        return f"Failed to save fact: {str(e)}"
 
 def list_facts() -> List[str]:
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute("SELECT fact FROM user_memories ORDER BY id ASC")
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+    try:
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT fact FROM user_memories ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows if r[0]]
+    except Exception:
+        return []
 
 def get_all_memories_records() -> List[Dict[str, Any]]:
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, fact, category, created_at FROM user_memories ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return [
-        {"id": r[0], "fact": r[1], "category": r[2], "created_at": r[3]}
-        for r in rows
-    ]
+    try:
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, fact, category, created_at FROM user_memories ORDER BY id DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {"id": r[0], "fact": r[1], "category": r[2], "created_at": r[3]}
+            for r in rows
+        ]
+    except Exception:
+        return []
 
 def delete_memory_by_id(memory_id: int) -> bool:
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM user_memories WHERE id = ?", (memory_id,))
-    affected = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return affected > 0
+    try:
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM user_memories WHERE id = ?", (memory_id,))
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
+    except Exception:
+        return False
 
 # ==============================================================================
 # Google OAuth Client Factory (Calendar & Gmail)
@@ -272,7 +301,30 @@ def _normalize_iso_time(time_str: str) -> str:
     return clean
 
 # ==============================================================================
-# Canvas REST API Client & Tools (Token + Session Cookie Fallback)
+# Weather Integration Tool
+# ==============================================================================
+
+def get_weather(location: str = "Philadelphia") -> str:
+    clean_loc = urllib.parse.quote(location.strip() or "Philadelphia")
+    try:
+        url = f"https://wttr.in/{clean_loc}?format=%l:+%c+%t,+%w,+Humidity:+%h&m"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = response.read().decode("utf-8").strip()
+            if result and "Unknown location" not in result and "<html>" not in result:
+                return result
+    except Exception:
+        pass
+    try:
+        url_sec = f"https://wttr.in/{clean_loc}?0&m&T"
+        req_sec = urllib.request.Request(url_sec, headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req_sec, timeout=5) as response:
+            return response.read().decode("utf-8")[:600].strip()
+    except Exception as exc:
+        return f"Weather report currently unavailable for {location}: {str(exc)}"
+
+# ==============================================================================
+# Canvas REST API Client & Tools
 # ==============================================================================
 
 def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
@@ -292,7 +344,7 @@ def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Di
         req.add_header("Cookie", clean_cookie)
 
     req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     if payload:
         req.add_header("Content-Type", "application/json")
 
@@ -305,7 +357,6 @@ def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Di
         raise RuntimeError(f"Canvas API HTTP {e.code}: {err_msg}")
 
 def canvas_list_courses() -> str:
-    """Lists currently active enrolled courses, course names, codes, and IDs."""
     try:
         courses = _canvas_api_request("/courses?enrollment_state=active&include[]=term")
         if not courses:
@@ -323,10 +374,6 @@ def canvas_list_courses() -> str:
         return f"Failed to list Canvas courses: {str(e)}"
 
 def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = None) -> str:
-    """
-    Fetches assignments for a course with full details, descriptions, 
-    and grading rubric criteria.
-    """
     try:
         endpoint = f"/courses/{course_id}/assignments?include[]=rubric&order_by=due_at"
         assignments = _canvas_api_request(endpoint)
@@ -374,10 +421,6 @@ def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = N
         return f"Failed to fetch Canvas rubric: {str(e)}"
 
 def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = None) -> str:
-    """
-    Checks assignment submissions, grades, rubric evaluations, 
-    and instructor feedback comments.
-    """
     try:
         if assignment_id:
             endpoint = f"/courses/{course_id}/assignments/{assignment_id}/submissions/self?include[]=submission_comments&include[]=rubric_assessment"
@@ -694,7 +737,6 @@ def github_read_file(repo: str, path: str, branch: str = "main") -> str:
         data = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
         if data.get("encoding") == "base64" and data.get("content"):
             decoded = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-            # Truncate large files to protect token context
             if len(decoded) > 1500:
                 decoded = decoded[:1500] + "\n...[truncated for token efficiency]..."
             return f"--- Content of {clean_path} ({owner}/{repo}) ---\n{decoded}"
@@ -814,7 +856,7 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
     now = datetime.datetime.now()
     today_str = now.strftime("%A, %B %d, %Y")
     
-    weather_intel = web_search_tool(f"current weather today in {location}", max_results=2)
+    weather_intel = get_weather(location)
     gmail_intel = gmail_search_messages(query="is:unread", max_results=4)
 
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone().isoformat()
@@ -844,6 +886,20 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
 # ==============================================================================
 
 tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather conditions and forecast for a given location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name, zip code, or region"}
+                },
+                "required": ["location"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -1148,6 +1204,7 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "get_weather": get_weather,
     "canvas_list_courses": canvas_list_courses,
     "canvas_get_assignment_rubric": canvas_get_assignment_rubric,
     "canvas_get_submission_grades": canvas_get_submission_grades,
@@ -1249,40 +1306,25 @@ async def transcribe_audio(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
 
-@app.options("/chat")
-@app.options("/chat/")
-@app.options("/transcribe")
-@app.options("/transcribe/")
-@app.options("/agenda")
-@app.options("/memories")
-async def cors_preflight_handler():
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE, PUT",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
-        }
-    )
-
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
     if not groq_client:
         return ChatResponse(reply="GROQ_API_KEY is not configured on the backend.", session_id=request.session_id or "")
 
-    session_id = request.session_id or str(datetime.datetime.now().timestamp())
+    session_id = request.session_id or "default_session"
+    user_input = request.message.strip()
     
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
     
-    # Prune history to last 6 entries to prevent token exhaustion
+    # Prune history to last 6 entries to prevent token exhaustion and eliminate corruption
     history_records = get_history(session_id, limit=6)
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
-        "You have direct execution powers over Canvas, Gmail, Google Calendar, GitHub, Web Search, and SQLite memory.\n"
+        "You have direct execution powers over Canvas, Gmail, Google Calendar, GitHub, Weather, Web Search, and SQLite memory.\n"
         "PERMANENT USER FACTS STORED IN MEMORY:\n"
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
@@ -1296,8 +1338,8 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         role_label = "user" if r["role"] == "user" else "assistant"
         messages.append({"role": role_label, "content": r["content"]})
 
-    messages.append({"role": "user", "content": request.message})
-    save_message(session_id, "user", request.message)
+    messages.append({"role": "user", "content": user_input})
+    save_message(session_id, "user", user_input)
 
     reply_text = ""
     max_turns = 4
@@ -1337,30 +1379,49 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             # If the model produced no tool calls, capture content and finish
             if not response_msg.tool_calls:
-                content = response_msg.content or ""
-                if content.strip():
-                    reply_text = content.strip()
+                content = (response_msg.content or "").strip()
+                if not content and hasattr(response_msg, "reasoning_content"):
+                    content = (getattr(response_msg, "reasoning_content") or "").strip()
+
+                if content:
+                    reply_text = content
                     break
 
                 # If content was empty after tools executed, build a prompt that satisfies Groq's message sequence
                 if turn_count > 1:
-                    messages.append({
-                        "role": "user",
-                        "content": "Synthesize the results from the tool outputs above into a clear executive summary."
-                    })
-                    final_completion = groq_client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=messages,
-                        temperature=0.3
-                    )
-                    reply_text = final_completion.choices[0].message.content or "Action executed, but no response text was returned."
+                    tool_outputs = [
+                        str(m.get("content", "")) for m in messages 
+                        if isinstance(m, dict) and m.get("role") == "tool"
+                    ]
+                    try:
+                        messages.append({
+                            "role": "user",
+                            "content": "Synthesize the results from the tool outputs above into a clear executive summary."
+                        })
+                        final_completion = groq_client.chat.completions.create(
+                            model=GROQ_MODEL,
+                            messages=messages,
+                            temperature=0.3
+                        )
+                        final_msg = final_completion.choices[0].message
+                        forced_content = (final_msg.content or getattr(final_msg, "reasoning_content", "") or "").strip()
+                        if forced_content:
+                            reply_text = forced_content
+                            break
+                    except Exception:
+                        pass
+
+                    if tool_outputs:
+                        reply_text = tool_outputs[-1]
+                    else:
+                        reply_text = "Task executed."
                     break
                 else:
                     reply_text = "Task executed."
                     break
 
             # Clean assistant message payload to prevent unsupported field errors (e.g., annotations, refusal)
-            assistant_payload = {
+            assistant_payload: Dict[str, Any] = {
                 "role": "assistant",
                 "content": response_msg.content or "",
             }
@@ -1378,11 +1439,16 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 ]
 
             messages.append(assistant_payload)
-           
+
             # Execute tool calls
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
-                fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                fn_args = {}
+                if tool_call.function.arguments:
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments)
+                    except Exception:
+                        fn_args = {}
 
                 if fn_name in tool_dispatch:
                     try:
@@ -1403,39 +1469,14 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": trimmed_result
                 })
 
-        # If the model didn't call any tools:
-            if not response_msg.tool_calls:
-                # Handle standard content or reasoning model outputs
-                content = response_msg.content or getattr(response_msg, "reasoning_content", "") or ""
-                if content.strip():
-                    reply_text = content.strip()
-                    break
-
-                # If content is empty after tool execution, force plain synthesis WITHOUT tools_schema
-                if turn_count > 1:
-                    messages.append({
-                        "role": "user",
-                        "content": "Provide a complete conversational summary of the tool data above."
-                    })
-                    final_completion = groq_client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=messages,
-                        temperature=0.3
-                    )
-                    final_msg = final_completion.choices[0].message
-                    reply_text = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
-                    
-                    # Direct raw fallback if text is still empty
-                    if not reply_text.strip():
-                        tool_outputs = [str(m["content"]) for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
-                        reply_text = "Retrieved results:\n\n" + "\n\n".join(tool_outputs)
-                    break
-                else:
-                    reply_text = "Directive received and processed."
-                    break
+        if not reply_text:
+            reply_text = "Directive completed."
 
     except Exception as e:
         reply_text = f"ARGUS backend runtime exception: {type(e).__name__} - {str(e)}"
 
-    save_message(session_id, "assistant", reply_text)
+    # Save only non-empty assistant messages to avoid database corruption
+    if reply_text and reply_text.strip():
+        save_message(session_id, "assistant", reply_text.strip())
+
     return ChatResponse(reply=reply_text, session_id=session_id)
