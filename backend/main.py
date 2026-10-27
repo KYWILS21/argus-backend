@@ -1359,9 +1359,26 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = "Task executed."
                     break
 
-            # Convert response message to standard dict structure for context preservation
-            messages.append(response_msg.model_dump())
+            # Clean assistant message payload to prevent unsupported field errors (e.g., annotations, refusal)
+            assistant_payload = {
+                "role": "assistant",
+                "content": response_msg.content or "",
+            }
+            if response_msg.tool_calls:
+                assistant_payload["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in response_msg.tool_calls
+                ]
 
+            messages.append(assistant_payload)
+           
             # Execute tool calls
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
