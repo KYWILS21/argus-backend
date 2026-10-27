@@ -1314,21 +1314,21 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = response_msg.content.strip()
                     break
 
-                # If tool calls finished but reply was blank, prompt a synthesis pass
+                # If synthesis returned empty after executing tools, force a clean completion pass without tools schema:
                 if turn_count > 1:
                     messages.append({
                         "role": "user",
-                        "content": "Synthesize and present the full details, rubric, and criteria from the tool results above."
+                        "content": "Please synthesize and present a clear, direct summary of the tool results above."
                     })
                     final_res = groq_client.chat.completions.create(
                         model=GROQ_MODEL,
                         messages=messages,
-                        temperature=0.4
+                        temperature=0.3
                     )
-                    reply_text = final_res.choices[0].message.content or "No details returned."
+                    reply_text = final_res.choices[0].message.content or "Task completed, but no text was generated."
                     break
                 else:
-                    reply_text = "Task completed."
+                    reply_text = response_msg.content or "Directive executed."
                     break
 
             messages.append(response_msg)
