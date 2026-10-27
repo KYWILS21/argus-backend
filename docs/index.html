@@ -729,6 +729,9 @@
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
+          const responseReply = data.reply && data.reply.trim() ? data.reply : "[System received empty completion from model]";
+          appendLog("ARGUS", responseReply);
+          speakDirective(responseReply);
           renderAgenda(data.events || []);
         } catch (err) {
           agendaList.innerHTML = `<div style="color:var(--alert-red); font-size:0.85rem;">Failed to load agenda: ${err.message}</div>`;

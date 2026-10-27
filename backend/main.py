@@ -1405,32 +1405,33 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
         # If the model didn't call any tools:
             if not response_msg.tool_calls:
-                content = response_msg.content or ""
+                # Handle standard content or reasoning model outputs
+                content = response_msg.content or getattr(response_msg, "reasoning_content", "") or ""
                 if content.strip():
                     reply_text = content.strip()
                     break
 
-                # If content was empty after tools executed, force a plain text completion pass WITHOUT tools_schema
+                # If content is empty after tool execution, force plain synthesis WITHOUT tools_schema
                 if turn_count > 1:
                     messages.append({
                         "role": "user",
-                        "content": "Please review the data retrieved by the tools above and provide a complete executive summary."
+                        "content": "Provide a complete conversational summary of the tool data above."
                     })
                     final_completion = groq_client.chat.completions.create(
                         model=GROQ_MODEL,
                         messages=messages,
                         temperature=0.3
-                        # Omitting tools parameter forces direct text synthesis
                     )
-                    reply_text = final_completion.choices[0].message.content or ""
+                    final_msg = final_completion.choices[0].message
+                    reply_text = final_msg.content or getattr(final_msg, "reasoning_content", "") or ""
                     
-                    # If still blank, directly surface the tool results
+                    # Direct raw fallback if text is still empty
                     if not reply_text.strip():
-                        tool_outputs = [m["content"] for m in messages if m.get("role") == "tool"]
-                        reply_text = "Directive executed. Output retrieved:\n\n" + "\n\n".join(tool_outputs)
+                        tool_outputs = [str(m["content"]) for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+                        reply_text = "Retrieved results:\n\n" + "\n\n".join(tool_outputs)
                     break
                 else:
-                    reply_text = "Task executed."
+                    reply_text = "Directive received and processed."
                     break
 
     except Exception as e:
