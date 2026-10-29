@@ -1378,9 +1378,8 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     try:
         while turn_count < max_turns:
             turn_count += 1
-
-            # Exponential backoff retry for Groq API calls
             response = None
+
             for attempt in range(3):
                 try:
                     response = groq_client.chat.completions.create(
@@ -1395,19 +1394,21 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     if attempt < 2:
                         time.sleep(2.0 * (attempt + 1))
                         continue
-                    return ChatResponse(reply="Groq rate limit exceeded (TPM/RPM ceiling). Please wait a moment and try again.", session_id=session_id)
+                    reply_text = "Groq rate limit reached. Please wait a moment and try again."
+                    break
                 except Exception as api_err:
                     if attempt < 2 and "429" in str(api_err):
                         time.sleep(2.0)
                         continue
-                    return ChatResponse(reply=f"Groq API error: {str(api_err)}", session_id=session_id)
+                    reply_text = f"Groq API error: {str(api_err)}"
+                    break
 
-            if not response or not response.choices:
+            if reply_text or not response or not response.choices:
                 break
 
             response_msg = response.choices[0].message
 
-            # If the model produced no tool calls, capture content and finish
+            # CASE 1: The model returned a normal text answer without requesting tools
             if not response_msg.tool_calls:
                 content = (response_msg.content or "").strip()
                 if not content and hasattr(response_msg, "reasoning_content"):
@@ -1417,20 +1418,22 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = content
                     break
 
-                # If content was empty after tools executed, force a plain text completion WITHOUT tools schema
+                # If content was empty after tool execution, force a direct plain completion pass WITHOUT tools parameter
                 if turn_count > 1:
                     tool_outputs = [
                         str(m.get("content", "")) for m in messages 
                         if isinstance(m, dict) and m.get("role") == "tool"
                     ]
+                    
                     try:
-                        messages.append({
+                        clean_synth_messages = list(messages)
+                        clean_synth_messages.append({
                             "role": "user",
-                            "content": "Synthesize the results from the tool outputs above into a clear executive summary."
+                            "content": "Synthesize the results above into a clear, direct executive summary."
                         })
                         forced_res = groq_client.chat.completions.create(
                             model=GROQ_MODEL,
-                            messages=messages,
+                            messages=clean_synth_messages,
                             temperature=0.3
                         )
                         forced_msg = forced_res.choices[0].message
@@ -1438,20 +1441,20 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                         if forced_content:
                             reply_text = forced_content
                             break
-                    except Exception:
-                        pass
+                    except Exception as synth_err:
+                        print(f"Forced synthesis exception: {synth_err}")
 
-                    # Direct fallback: return raw tool data so output is never lost
+                    # HARD FALLBACK: If the model still returned nothing, output the raw tool results directly
                     if tool_outputs:
-                        reply_text = "Here are the latest search results retrieved:\n\n" + "\n\n".join(tool_outputs)
+                        reply_text = "\n\n".join(tool_outputs)
                     else:
-                        reply_text = "Action completed."
+                        reply_text = "Action executed, but no content was returned by the tool."
                     break
                 else:
-                    reply_text = "Task executed."
+                    reply_text = "Directive received."
                     break
-                
-            # Clean assistant message payload to prevent unsupported field errors (e.g., annotations, refusal)
+
+            # CASE 2: The model requested tool calls
             assistant_payload: Dict[str, Any] = {
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -1471,7 +1474,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             messages.append(assistant_payload)
 
-            # Execute tool calls
             for tool_call in response_msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = {}
@@ -1489,10 +1491,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 else:
                     fn_result = f"Error: Tool '{fn_name}' not recognized."
 
-                # Enforce safe character cap per tool payload
                 trimmed_result = str(fn_result)
                 if len(trimmed_result) > 1200:
-                    trimmed_result = trimmed_result[:1200] + "... [truncated to prevent rate limits]"
+                    trimmed_result = trimmed_result[:1200] + "... [truncated]"
 
                 messages.append({
                     "role": "tool",
@@ -1500,9 +1501,17 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": trimmed_result
                 })
 
+        # Final check if loop exited without setting text:
         if not reply_text:
-            reply_text = "Directive completed."
-
+            tool_outputs = [
+                str(m.get("content", "")) for m in messages 
+                if isinstance(m, dict) and m.get("role") == "tool"
+            ]
+            if tool_outputs:
+                reply_text = "\n\n".join(tool_outputs)
+            else:
+                reply_text = "Action completed."
+                
     except Exception as e:
         reply_text = f"ARGUS backend runtime exception: {type(e).__name__} - {str(e)}"
 
