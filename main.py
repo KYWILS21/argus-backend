@@ -9,8 +9,10 @@ import datetime
 import urllib.request
 import urllib.parse
 import urllib.error
+import asyncio
 from email.message import EmailMessage
 from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,9 +49,55 @@ CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://templeu.instructure.com"
 CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "").strip()
 CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "").strip()
 
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "").strip()
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS Core Protocol Engine", version="2.8.7")
+async def autonomous_watchdog_daemon():
+    """Periodically scans Canvas and Google Calendar for upcoming deadlines and conflicts."""
+    await asyncio.sleep(60)  # Wait 60s post-boot
+
+    while True:
+        try:
+            # Check imminent Calendar events (starting within 3 hours)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            horizon = (now_utc + datetime.timedelta(hours=3)).isoformat()
+            events = fetch_raw_calendar_events(time_min_iso=now_utc.isoformat(), max_results=5)
+
+            for ev in events:
+                start_str = ev.get("start")
+                if start_str and start_str <= horizon:
+                    conn = sqlite3.connect(DATABASE_URL)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS system_state_cache (
+                            key TEXT PRIMARY KEY,
+                            last_seen_val TEXT,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    ev_id = str(ev.get("id"))
+                    cur.execute("SELECT last_seen_val FROM system_state_cache WHERE key = ?", (f"cal_{ev_id}",))
+                    if not cur.fetchone():
+                        cur.execute("INSERT OR REPLACE INTO system_state_cache (key, last_seen_val) VALUES (?, ?)", (f"cal_{ev_id}", ev.get("summary")))
+                        conn.commit()
+                        conn.close()
+                        send_iphone_push("Upcoming Schedule Alert", f"Event starting soon: {ev.get('summary')} at {start_str}", priority=1)
+                    else:
+                        conn.close()
+        except Exception as e:
+            print(f"Watchdog exception: {e}")
+
+        await asyncio.sleep(1200)  # Poll every 20 minutes
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    watchdog = asyncio.create_task(autonomous_watchdog_daemon())
+    yield
+    watchdog.cancel()
+
+app = FastAPI(title="ARGUS Core Protocol Engine", version="2.9.0", lifespan=lifespan)
 
 # ==============================================================================
 # CORS Configuration & Global Fallbacks
@@ -90,6 +138,34 @@ async def cors_preflight_handler(rest_of_path: str):
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
+
+
+def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
+    """Dispatches a push notification directly to user's iPhone via Pushover."""
+    if not (PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN):
+        return "Pushover credentials missing in environment variables."
+
+    url = "https://api.pushover.net/1/messages.json"
+    payload = urllib.parse.urlencode({
+        "token": PUSHOVER_APP_TOKEN,
+        "user": PUSHOVER_USER_KEY,
+        "title": f"ARGUS // {title}",
+        "message": message,
+        "priority": priority,
+        "sound": sound
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url, 
+        data=payload, 
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, 
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return "Notification delivered to iPhone."
+    except Exception as exc:
+        return f"Push dispatch failed: {str(exc)}"
 
 # ==============================================================================
 # Security / Auth
@@ -1260,7 +1336,22 @@ tools_schema = [
                 "required": ["event_id"]
             }
         }
-    }
+    }, 
+    {
+        "type": "function",
+        "function": {
+            "name": "send_iphone_push",
+            "description": "Sends an instant high-priority alert or notification directly to the user's iPhone lock screen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short headline for the alert banner."},
+                    "message": {"type": "string", "description": "Body message or brief to transmit."}
+                },
+                "required": ["title", "message"]
+            }
+        }
+    },
 ]
 
 tool_dispatch = {
@@ -1284,7 +1375,8 @@ tool_dispatch = {
     "list_calendar_events": list_calendar_events,
     "create_calendar_event": create_calendar_event,
     "update_calendar_event": update_calendar_event,
-    "delete_calendar_event": delete_calendar_event
+    "delete_calendar_event": delete_calendar_event,
+    "send_iphone_push": send_iphone_push
 }
 
 # ==============================================================================
