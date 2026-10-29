@@ -133,11 +133,25 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fact TEXT NOT NULL,
+            fact TEXT NOT NULL UNIQUE,
             category TEXT DEFAULT 'general',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Core Persistent Profile Seeds (survives all redeploys and restarts)
+    permanent_profile_seeds = [
+        ("The user's favorite algorithm is Dijkstra's algorithm.", "preference"),
+        ("The user is Kyle Wilson, studying Computer Science at Temple University.", "profile"),
+        ("The user prefers autonomous executive summaries with clean markdown tables and structured bullet points.", "instruction")
+    ]
+
+    for fact, category in permanent_profile_seeds:
+        cursor.execute(
+            "INSERT OR IGNORE INTO user_memories (fact, category) VALUES (?, ?)",
+            (fact, category)
+        )
+
     conn.commit()
     conn.close()
 
@@ -189,7 +203,7 @@ def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
         cursor = conn.cursor()
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cursor.execute(
-            "INSERT INTO user_memories (fact, category, created_at) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO user_memories (fact, category, created_at) VALUES (?, ?, ?)",
             (clean_fact, category or "general", now_iso)
         )
         conn.commit()
