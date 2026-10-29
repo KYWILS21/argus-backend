@@ -340,11 +340,18 @@ def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Di
     if CANVAS_API_TOKEN:
         req.add_header("Authorization", f"Bearer {CANVAS_API_TOKEN}")
     elif CANVAS_SESSION_COOKIE:
-        clean_cookie = CANVAS_SESSION_COOKIE.strip().strip('"').strip("'")
-        req.add_header("Cookie", clean_cookie)
+        cookie_header = CANVAS_SESSION_COOKIE.strip().strip('"').strip("'")
+        if not cookie_header.startswith("canvas_session="):
+            cookie_header = f"canvas_session={cookie_header}"
+        req.add_header("Cookie", cookie_header)
+        req.add_header("Referer", f"{CANVAS_BASE_URL}/")
+        req.add_header("Origin", CANVAS_BASE_URL)
+        req.add_header("Sec-Fetch-Site", "same-origin")
+        req.add_header("Sec-Fetch-Mode", "cors")
+        req.add_header("Sec-Fetch-Dest", "empty")
 
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    req.add_header("Accept", "application/json, text/plain, */*")
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     if payload:
         req.add_header("Content-Type", "application/json")
 
@@ -355,7 +362,7 @@ def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Di
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode("utf-8")
         raise RuntimeError(f"Canvas API HTTP {e.code}: {err_msg}")
-
+        
 def canvas_list_courses() -> str:
     try:
         courses = _canvas_api_request("/courses?enrollment_state=active&include[]=term")
