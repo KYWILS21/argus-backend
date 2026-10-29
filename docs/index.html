@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>A.R.G.U.S. // SYSTEM HUD</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
   <style>
     :root {
       --cyan-primary: #00f0ff;
@@ -13,13 +15,14 @@
       --panel-bg: rgba(6, 20, 36, 0.75);
       --alert-amber: #ffb84d;
       --alert-red: #ff4d4d;
+      --font-mono: 'Courier New', Courier, monospace;
     }
 
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
-      font-family: 'Courier New', Courier, monospace;
+      font-family: var(--font-mono);
     }
 
     body {
@@ -297,34 +300,119 @@
 
     .log-line {
       display: flex;
-      gap: 12px;
+      flex-direction: column;
+      gap: 6px;
       line-height: 1.5;
       font-size: 0.9rem;
+      padding: 12px 16px;
+      background: rgba(10, 20, 36, 0.45);
+      border-left: 3px solid var(--cyan-primary);
+      border-radius: 4px;
+    }
+
+    .log-line.user {
+      border-left-color: var(--alert-amber);
+      background: rgba(255, 184, 77, 0.05);
+    }
+
+    .log-line.system {
+      border-left-color: #88a0b0;
+      background: rgba(136, 160, 176, 0.05);
+    }
+
+    .log-line.error {
+      border-left-color: var(--alert-red);
+      background: rgba(255, 77, 77, 0.08);
     }
 
     .log-sender {
       font-weight: bold;
       color: var(--cyan-primary);
-      min-width: 90px;
-      letter-spacing: 1px;
+      font-size: 0.75rem;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
     }
 
-    .log-sender.user {
+    .log-line.user .log-sender {
       color: var(--alert-amber);
     }
 
-    .log-sender.system {
+    .log-line.system .log-sender {
       color: #88a0b0;
     }
 
-    .log-sender.error {
+    .log-line.error .log-sender {
       color: var(--alert-red);
     }
 
     .log-content {
       color: #e0f7fa;
-      white-space: pre-wrap;
+      font-size: 0.88rem;
+      line-height: 1.6;
       word-break: break-word;
+    }
+
+    /* Rendered Markdown Styling */
+    .log-content p {
+      margin-bottom: 0.5rem;
+    }
+    .log-content p:last-child {
+      margin-bottom: 0;
+    }
+    .log-content h1, .log-content h2, .log-content h3 {
+      color: #fff;
+      margin: 0.8rem 0 0.4rem 0;
+      letter-spacing: 0.5px;
+    }
+    .log-content h2 {
+      font-size: 1.05rem;
+      border-bottom: 1px solid var(--cyan-dim);
+      padding-bottom: 0.2rem;
+    }
+    .log-content h3 {
+      font-size: 0.95rem;
+    }
+    .log-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0.8rem 0;
+      font-size: 0.84rem;
+      background: rgba(3, 10, 20, 0.4);
+    }
+    .log-content th, .log-content td {
+      border: 1px solid var(--cyan-dim);
+      padding: 7px 12px;
+      text-align: left;
+    }
+    .log-content th {
+      background: rgba(0, 240, 255, 0.12);
+      color: var(--cyan-primary);
+      font-weight: bold;
+    }
+    .log-content ul, .log-content ol {
+      margin: 0.4rem 0 0.4rem 1.4rem;
+    }
+    .log-content li {
+      margin-bottom: 0.25rem;
+    }
+    .log-content code {
+      background: rgba(0, 240, 255, 0.1);
+      color: var(--cyan-primary);
+      padding: 0.15rem 0.35rem;
+      border-radius: 3px;
+      font-size: 0.82rem;
+    }
+    .log-content pre {
+      background: #040810;
+      border: 1px solid var(--cyan-dim);
+      padding: 0.75rem;
+      border-radius: 4px;
+      margin: 0.5rem 0;
+      overflow-x: auto;
+    }
+    .log-content a {
+      color: var(--cyan-primary);
+      text-decoration: underline;
     }
 
     .hud-drawer {
@@ -471,6 +559,21 @@
       from { opacity: 0; transform: translateY(-8px); }
       to { opacity: 1; transform: translateY(0); }
     }
+
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.2);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--cyan-dim);
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--cyan-primary);
+    }
   </style>
 </head>
 <body>
@@ -510,9 +613,9 @@
       </div>
 
       <div id="terminal-logs" class="terminal-logs">
-        <div class="log-line">
+        <div class="log-line system">
           <span class="log-sender">ARGUS</span>
-          <span class="log-content">Protocol initialized. Passive wake-word engine active. Say "ARGUS" at any time to issue directives.</span>
+          <div class="log-content">Protocol initialized. Passive wake-word engine active. Say "ARGUS" at any time to issue directives.</div>
         </div>
       </div>
     </div>
@@ -590,6 +693,14 @@
 
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
       canvas.height = canvas.clientHeight * window.devicePixelRatio || 85;
+
+      // Configure Marked parser
+      if (typeof marked !== "undefined") {
+        marked.setOptions({
+          gfm: true,
+          breaks: true
+        });
+      }
 
       // Synth Chime (Audio Cues)
       function playChime(freq = 880, type = "sine", duration = 0.12) {
@@ -701,7 +812,7 @@
       }
 
       statusKey.addEventListener("click", () => {
-        const inputKey = prompt("Enter your ARGUS_BEARER_TOKEN from Railway:", authToken);
+        const inputKey = prompt("Enter your ARGUS_BEARER_TOKEN:", authToken);
         if (inputKey !== null && inputKey.trim()) {
           authToken = inputKey.trim();
           localStorage.setItem("argus_auth_bearer", authToken);
@@ -729,9 +840,6 @@
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
-          const responseReply = data.reply && data.reply.trim() ? data.reply : "[System received empty completion from model]";
-          appendLog("ARGUS", responseReply);
-          speakDirective(responseReply);
           renderAgenda(data.events || []);
         } catch (err) {
           agendaList.innerHTML = `<div style="color:var(--alert-red); font-size:0.85rem;">Failed to load agenda: ${err.message}</div>`;
@@ -868,21 +976,26 @@
         localStorage.setItem("argus_session_id", sessionId);
       }
 
-      function appendLog(sender, text, type = "") {
-        if (!terminal) return;
+      // Robust Markdown Terminal Append Log
+      function appendLog(sender, text, type = "normal") {
         const line = document.createElement("div");
-        line.className = "log-line";
+        line.className = `log-line ${type}`;
 
-        const badge = document.createElement("span");
-        badge.className = `log-sender ${type}`;
-        badge.textContent = sender;
+        const senderSpan = document.createElement("span");
+        senderSpan.className = "log-sender";
+        senderSpan.textContent = sender;
 
-        const body = document.createElement("span");
-        body.className = "log-content";
-        body.textContent = text;
+        const contentDiv = document.createElement("div");
+        contentDiv.className = "log-content";
 
-        line.appendChild(badge);
-        line.appendChild(body);
+        if (sender === "ARGUS" && typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+          contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(text));
+        } else {
+          contentDiv.textContent = text;
+        }
+
+        line.appendChild(senderSpan);
+        line.appendChild(contentDiv);
         terminal.appendChild(line);
         terminal.scrollTop = terminal.scrollHeight;
       }
@@ -1014,10 +1127,22 @@
       async function sendDirective(message) {
         if (!message || !message.trim()) return;
 
+        const cleanMessage = message.trim();
+
+        // Built-in session reset command
+        if (cleanMessage.toLowerCase() === "/reset" || cleanMessage.toLowerCase() === "clear") {
+          sessionId = crypto.randomUUID();
+          localStorage.setItem("argus_session_id", sessionId);
+          terminal.innerHTML = "";
+          appendLog("SYSTEM", "Session buffer reset. Fresh memory stream initialized.", "system");
+          if (promptInput) promptInput.value = "";
+          return;
+        }
+
         if (window.speechSynthesis) window.speechSynthesis.cancel();
         reactorBox.classList.remove("speaking");
 
-        appendLog("KYLE", message, "user");
+        appendLog("KYLE", cleanMessage, "user");
         if (promptInput) promptInput.value = "";
         if (statusTools) {
           statusTools.textContent = "PROCESSING...";
@@ -1031,7 +1156,7 @@
               "Content-Type": "application/json",
               "Authorization": `Bearer ${authToken.trim()}`
             },
-            body: JSON.stringify({ message: message, session_id: sessionId })
+            body: JSON.stringify({ message: cleanMessage, session_id: sessionId })
           });
 
           if (res.status === 403) {
@@ -1044,8 +1169,9 @@
           }
 
           const data = await res.json();
-          appendLog("ARGUS", data.reply);
-          speakDirective(data.reply);
+          const responseReply = data.reply && data.reply.trim() ? data.reply : "[Action executed with zero textual feedback]";
+          appendLog("ARGUS", responseReply);
+          speakDirective(responseReply);
         } catch (err) {
           appendLog("ERROR", `Directive failed: ${err.message}`, "error");
         } finally {

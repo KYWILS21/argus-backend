@@ -1,4 +1,6 @@
 import os
+import re
+import sys
 import json
 import time
 import base64
@@ -47,7 +49,7 @@ CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "").strip()
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="ARGUS API", version="2.8.6")
+app = FastAPI(title="ARGUS Core Protocol Engine", version="2.8.7")
 
 # ==============================================================================
 # CORS Configuration & Global Fallbacks
@@ -324,7 +326,7 @@ def get_weather(location: str = "Philadelphia") -> str:
         return f"Weather report currently unavailable for {location}: {str(exc)}"
 
 # ==============================================================================
-# Canvas REST API Client & Tools
+# Canvas REST API Client & Sanitized Extraction Tools
 # ==============================================================================
 
 def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
@@ -362,7 +364,7 @@ def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Di
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode("utf-8")
         raise RuntimeError(f"Canvas API HTTP {e.code}: {err_msg}")
-        
+
 def canvas_list_courses() -> str:
     try:
         courses = _canvas_api_request("/courses?enrollment_state=active&include[]=term")
@@ -396,9 +398,11 @@ def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = N
             a_id = a.get("id")
             due_at = a.get("due_at", "No due date specified")
             points = a.get("points_possible", "N/A")
+            
+            # Clean HTML tags and excessive spacing out of description snippets
             desc_raw = a.get("description", "") or "No description provided."
-            clean_desc = desc_raw.replace("<p>", "").replace("</p>", "\n").replace("<br>", "\n").replace("<br/>", "\n")
-            clean_desc = clean_desc[:400]
+            clean_desc = re.sub(r'<[^>]+>', ' ', desc_raw)
+            clean_desc = " ".join(clean_desc.split())[:350]
 
             rubric = a.get("rubric", [])
             rubric_details = []
@@ -413,17 +417,17 @@ def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = N
                 rubric_block = "  No structured rubric attached to this assignment."
 
             matches.append(
-                f"=== ASSIGNMENT: {title} (ID: {a_id}) ===\n"
-                f"Due Date: {due_at}\n"
-                f"Points Possible: {points}\n"
-                f"Description Snippet:\n{clean_desc.strip()}\n\n"
-                f"Grading Rubric:\n{rubric_block}\n"
+                f"### {title} (ID: {a_id})\n"
+                f"- **Due Date:** {due_at}\n"
+                f"- **Points:** {points}\n"
+                f"- **Description Snippet:** {clean_desc}...\n\n"
+                f"**Grading Rubric:**\n{rubric_block}\n"
             )
 
         if not matches:
             return f"No assignments matched '{search_query}' in course {course_id}."
 
-        return "\n\n".join(matches[:3])
+        return "\n\n".join(matches[:4])
     except Exception as e:
         return f"Failed to fetch Canvas rubric: {str(e)}"
 
@@ -434,8 +438,14 @@ def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = 
             sub = _canvas_api_request(endpoint)
             submissions = [sub] if sub else []
         else:
+            # Fallback path directly handling self-assessment endpoint safely
             endpoint = f"/courses/{course_id}/students/submissions/self?include[]=assignment&include[]=submission_comments&include[]=rubric_assessment&per_page=10"
-            submissions = _canvas_api_request(endpoint)
+            try:
+                submissions = _canvas_api_request(endpoint)
+            except Exception:
+                endpoint = f"/courses/{course_id}/assignments?include[]=submission"
+                assigns = _canvas_api_request(endpoint)
+                submissions = [a.get("submission") for a in assigns if a.get("submission")]
 
         if not submissions:
             return f"No submissions found for course {course_id}."
@@ -468,15 +478,15 @@ def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = 
                 rubric_eval_block = "  No rubric breakdown evaluated."
 
             results.append(
-                f"=== {a_name} ===\n"
-                f"Status: {state.upper()}\n"
-                f"Score: {score} | Grade: {grade}\n"
-                f"Submitted At: {sub_at}\n"
-                f"Instructor Comments:\n{comment_block}\n"
-                f"Rubric Assessment:\n{rubric_eval_block}\n"
+                f"### {a_name}\n"
+                f"- **Status:** {state.upper()}\n"
+                f"- **Score:** {score} | **Grade:** {grade}\n"
+                f"- **Submitted:** {sub_at}\n"
+                f"- **Feedback:**\n{comment_block}\n"
+                f"- **Rubric Assessment:**\n{rubric_eval_block}\n"
             )
 
-        return "\n".join(results[:4])
+        return "\n\n".join(results[:4])
     except Exception as e:
         return f"Failed to retrieve submission grades: {str(e)}"
 
@@ -510,7 +520,7 @@ def gmail_search_messages(query: str = "is:unread", max_results: int = 5) -> str
             date = headers.get("Date", "")
             snippet = msg_detail.get("snippet", "")
 
-            summaries.append(f"- [ID: {msg_id}] From: {sender}\n  Subject: {subject}\n  Date: {date}\n  Preview: {snippet}")
+            summaries.append(f"- **From:** {sender}\n  **Subject:** {subject}\n  **Date:** {date}\n  **Snippet:** {snippet}")
 
         return "\n\n".join(summaries)
     except Exception as e:
@@ -531,12 +541,12 @@ def gmail_read_message(message_id: str) -> str:
         snippet = msg.get("snippet", "")
 
         return (
-            f"--- Email Message Details ---\n"
-            f"ID: {message_id}\n"
-            f"From: {sender}\n"
-            f"Subject: {subject}\n"
-            f"Date: {date}\n\n"
-            f"Body Content / Snippet:\n{snippet}"
+            f"### Email Message Details\n"
+            f"- **ID:** {message_id}\n"
+            f"- **From:** {sender}\n"
+            f"- **Subject:** {subject}\n"
+            f"- **Date:** {date}\n\n"
+            f"**Content / Body:**\n{snippet}"
         )
     except Exception as e:
         return f"Error reading message {message_id}: {str(e)}"
@@ -562,11 +572,11 @@ def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
         return f"Error creating Gmail draft: {str(e)}"
 
 # ==============================================================================
-# Google Calendar & Search Tools
+# Google Calendar & Resilient Search Tools
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
-    # 1. Primary DDGS attempt
+    # 1. Primary DDGS API Attempt
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -576,7 +586,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
                     title = r.get("title", "Untitled")
                     body = r.get("body", "No description.")
                     href = r.get("href", "")
-                    output.append(f"Title: {title}\nSnippet: {body}\nURL: {href}")
+                    output.append(f"**[{title}]({href})**\n{body}")
                 return "\n\n".join(output)
     except Exception:
         pass
@@ -594,7 +604,6 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         with urllib.request.urlopen(req, timeout=6) as resp:
             raw_html = resp.read().decode("utf-8", errors="ignore")
 
-        import re
         snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', raw_html, re.DOTALL)
         titles = re.findall(r'<a class="result__url[^>]*href="([^"]*)"[^>]*>(.*?)</a>', raw_html, re.DOTALL)
 
@@ -603,14 +612,14 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
             clean_snip = re.sub(r'<[^>]+>', '', snippets[i]).strip()
             clean_title = re.sub(r'<[^>]+>', '', titles[i][1]).strip() if i < len(titles) else "News Item"
             if clean_snip:
-                parsed.append(f"Headline: {clean_title}\nSummary: {clean_snip}")
+                parsed.append(f"**{clean_title}**\n{clean_snip}")
 
         if parsed:
             return "\n\n".join(parsed)
     except Exception as e:
-        return f"Search execution failed: {str(e)}"
+        return f"Live web search execution failed: {str(e)}"
 
-    return f"No search results found for: '{query}'."
+    return f"No active search matches returned for query: '{query}'."
 
 def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
     service = get_calendar_service()
@@ -657,7 +666,7 @@ def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 
     events = fetch_raw_calendar_events(time_min_iso, max_results)
     if not events:
         return "No upcoming events found on connected calendars or integration is inactive."
-    result = [f"- [{e['calendar']}] {e['summary']} (Starts: {e['start']}, ID: {e['id']})" for e in events]
+    result = [f"- **[{e['calendar']}]** {e['summary']} *(Starts: {e['start']})*" for e in events]
     return "\n".join(result)
 
 def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
@@ -738,7 +747,7 @@ def github_list_repos(limit: int = 15) -> str:
         data = _github_api_request(f"/user/repos?sort=updated&per_page={limit}")
         if not data:
             return "No repositories found for this account."
-        repos = [f"- {r['full_name']} (Private: {r['private']}, Description: {r['description'] or 'None'})" for r in data]
+        repos = [f"- **{r['full_name']}** (Private: {r['private']}, Description: {r['description'] or 'None'})" for r in data]
         return "\n".join(repos)
     except Exception as e:
         return f"Failed to list GitHub repositories: {str(e)}"
@@ -775,8 +784,8 @@ def github_read_file(repo: str, path: str, branch: str = "main") -> str:
         if data.get("encoding") == "base64" and data.get("content"):
             decoded = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
             if len(decoded) > 1500:
-                decoded = decoded[:1500] + "\n...[truncated for token efficiency]..."
-            return f"--- Content of {clean_path} ({owner}/{repo}) ---\n{decoded}"
+                decoded = decoded[:1500] + "\n...[truncated for context limits]..."
+            return f"```\n{decoded}\n```"
         return f"File found but unexpected encoding or directory: {clean_path}"
     except Exception as e:
         return f"Failed to read file '{path}': {str(e)}"
@@ -821,7 +830,7 @@ def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
         return f"Failed to create issue: {str(e)}"
 
 # ==============================================================================
-# Reservation & Briefing Engines
+# Reservation & Executive Briefing Engines
 # ==============================================================================
 
 def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -> str:
@@ -877,16 +886,16 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
         cal_result = f"Could not create calendar placeholder: {str(e)}"
 
     return (
-        f"--- RESERVATION DIRECTIVE PREPARED ---\n"
-        f"Venue: {restaurant_name} ({location})\n"
-        f"Party Size: {party_size}\n"
-        f"Time Window: {date_str} at {time_str}\n\n"
-        f"Calendar Hold: {cal_result}\n\n"
-        f"Direct Booking Portals:\n"
-        f"1. OpenTable: {opentable_link}\n"
-        f"2. Resy: {resy_link}\n"
-        f"3. Google Maps / Reserve: {google_reserve_link}\n\n"
-        f"Venue Intel:\n{search_info[:400]}"
+        f"### RESERVATION DIRECTIVE PREPARED\n\n"
+        f"- **Venue:** {restaurant_name} ({location})\n"
+        f"- **Party Size:** {party_size}\n"
+        f"- **Time Window:** {date_str} at {time_str}\n"
+        f"- **Calendar Hold:** {cal_result}\n\n"
+        f"**Direct Booking Portals:**\n"
+        f"1. [OpenTable Portal]({opentable_link})\n"
+        f"2. [Resy Portal]({resy_link})\n"
+        f"3. [Google Maps / Reserve]({google_reserve_link})\n\n"
+        f"**Venue Intel:**\n{search_info[:400]}"
     )
 
 def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
@@ -905,17 +914,16 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
             cal_label = ev.get("calendar", "Calendar")
             summary = ev.get("summary", "Event")
             start = ev.get("start", "")
-            agenda_lines.append(f"- [{cal_label}] {summary} at {start}")
+            agenda_lines.append(f"- **[{cal_label}]** {summary} *(Starts: {start})*")
         agenda_block = "\n".join(agenda_lines)
     else:
         agenda_block = "No events, deadlines, or exams scheduled for the next 48 hours."
 
     return (
-        f"=== EXECUTIVE BRIEFING FOR {today_str.upper()} ===\n\n"
-        f"[LOCAL WEATHER - {location.upper()}]\n{weather_intel}\n\n"
-        f"[ACTIONABLE INBOX // UNREAD GMAIL]\n{gmail_intel}\n\n"
-        f"[CANVAS & SCHEDULE // NEXT 48 HOURS]\n{agenda_block}\n\n"
-        f"=== END OF BRIEFING DATA ==="
+        f"## EXECUTIVE BRIEFING FOR {today_str.upper()}\n\n"
+        f"### Local Weather ({location})\n{weather_intel}\n\n"
+        f"### Actionable Inbox // Unread Messages\n{gmail_intel}\n\n"
+        f"### Canvas & Google Calendar // Next 48 Hours\n{agenda_block}\n"
     )
 
 # ==============================================================================
@@ -1343,6 +1351,10 @@ async def transcribe_audio(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
 
+# ==============================================================================
+# Core Chat & Deterministic Execution Pipeline
+# ==============================================================================
+
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/chat/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
@@ -1355,7 +1367,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
     
-    # Prune history to last 6 entries to prevent token exhaustion and eliminate corruption
+    # Prune history to last 6 entries to prevent token exhaustion and eliminate database pollution
     history_records = get_history(session_id, limit=6)
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
@@ -1366,7 +1378,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         f"{facts_block}\n\n"
         "OPERATIONAL DIRECTIVE:\n"
         "- Execute appropriate tools to fulfill the user's intent.\n"
-        "- Always provide a full, structured markdown answer summarizing tool outputs."
+        "- Always provide a full, structured markdown answer summarizing tool outputs with clear headers, tables, and bold formatting."
     )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -1415,7 +1427,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             response_msg = response.choices[0].message
 
-            # CASE 1: The model returned a normal text answer without requesting tools
+            # Case 1: Model returned text without requesting any tools
             if not response_msg.tool_calls:
                 content = (response_msg.content or "").strip()
                 if not content and hasattr(response_msg, "reasoning_content"):
@@ -1425,7 +1437,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = content
                     break
 
-                # If content was empty after tool execution, force a direct plain completion pass WITHOUT tools parameter
+                # Post-tool synthesis turn returned empty content
                 if turn_count > 1:
                     tool_outputs = [
                         str(m.get("content", "")) for m in messages 
@@ -1449,9 +1461,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                             reply_text = forced_content
                             break
                     except Exception as synth_err:
-                        print(f"Forced synthesis exception: {synth_err}")
+                        print(f"Forced synthesis error: {synth_err}")
 
-                    # HARD FALLBACK: If the model still returned nothing, output the raw tool results directly
+                    # Direct fallback: dump the collected tool outputs
                     if tool_outputs:
                         reply_text = "\n\n".join(tool_outputs)
                     else:
@@ -1461,7 +1473,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = "Directive received."
                     break
 
-            # CASE 2: The model requested tool calls
+            # Case 2: Model emitted tool call requests
             assistant_payload: Dict[str, Any] = {
                 "role": "assistant",
                 "content": response_msg.content or "",
@@ -1508,7 +1520,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     "content": trimmed_result
                 })
 
-        # Final check if loop exited without setting text:
+        # Final loop exit guard: surface tool data if reply_text remained empty
         if not reply_text:
             tool_outputs = [
                 str(m.get("content", "")) for m in messages 
@@ -1518,7 +1530,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                 reply_text = "\n\n".join(tool_outputs)
             else:
                 reply_text = "Action completed."
-                
+
     except Exception as e:
         reply_text = f"ARGUS backend runtime exception: {type(e).__name__} - {str(e)}"
 
