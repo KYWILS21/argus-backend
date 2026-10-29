@@ -1364,7 +1364,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     session_id = request.session_id or "default_session"
     user_input = request.message.strip()
-    
+
+    # Define timestamps and memory facts BEFORE building system_prompt
+    current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
 
@@ -1376,27 +1378,15 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         "===============================================\n\n"
         "OPERATIONAL DIRECTIVE:\n"
         "- If the user asks about personal preferences, rules, or saved information, CONSULT THE PERMANENT LONG-TERM FACTS ABOVE.\n"
-        "- For example, if a favorite algorithm, tool, or preference is listed there, state it immediately as verified truth.\n"
-        "- Execute appropriate tools to fulfill the user's intent.\n"
-        "- Always provide a full, structured markdown answer summarizing tool outputs with clear headers, tables, and bold formatting."
-    )
-    
-    # Prune history to last 6 entries to prevent token exhaustion and eliminate database pollution
-    history_records = get_history(session_id, limit=6)
-    current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-
-    system_prompt = (
-        f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
-        "You have direct execution powers over Canvas, Gmail, Google Calendar, GitHub, Weather, Web Search, and SQLite memory.\n"
-        "PERMANENT USER FACTS STORED IN MEMORY:\n"
-        f"{facts_block}\n\n"
-        "OPERATIONAL DIRECTIVE:\n"
+        "- If a preference or fact is listed there (e.g. favorite algorithm), state it immediately as verified truth.\n"
         "- Execute appropriate tools to fulfill the user's intent.\n"
         "- Always provide a full, structured markdown answer summarizing tool outputs with clear headers, tables, and bold formatting."
     )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     
+    # Load clean history records from SQLite
+    history_records = get_history(session_id, limit=6)
     for r in history_records:
         role_label = "user" if r["role"] == "user" else "assistant"
         messages.append({"role": role_label, "content": r["content"]})
