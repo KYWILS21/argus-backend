@@ -559,7 +559,7 @@ def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
-    # 1. Try DuckDuckGo DDGS library
+    # 1. Primary DDGS attempt
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -574,36 +574,37 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     except Exception:
         pass
 
-    # 2. Resilient Fallback: Direct DuckDuckGo Lite / HTML scraper
+    # 2. Resilient Direct HTML Scraper Fallback
     try:
         clean_q = urllib.parse.quote(query)
         url = f"https://html.duckduckgo.com/html/?q={clean_q}"
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             }
         )
-        with urllib.request.urlopen(req, timeout=7) as resp:
+        with urllib.request.urlopen(req, timeout=6) as resp:
             raw_html = resp.read().decode("utf-8", errors="ignore")
-            
+
         import re
         snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', raw_html, re.DOTALL)
         titles = re.findall(r'<a class="result__url[^>]*href="([^"]*)"[^>]*>(.*?)</a>', raw_html, re.DOTALL)
-        
+
         parsed = []
         for i in range(min(max_results, len(snippets))):
             clean_snip = re.sub(r'<[^>]+>', '', snippets[i]).strip()
             clean_title = re.sub(r'<[^>]+>', '', titles[i][1]).strip() if i < len(titles) else "News Item"
             if clean_snip:
                 parsed.append(f"Headline: {clean_title}\nSummary: {clean_snip}")
-                
+
         if parsed:
             return "\n\n".join(parsed)
     except Exception as e:
-        return f"Live search returned no direct feed: {str(e)}"
+        return f"Search execution failed: {str(e)}"
 
-    return f"No direct search matches found for: '{query}'."
+    return f"No search results found for: '{query}'."
+
 def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
     service = get_calendar_service()
     if not service:
@@ -1406,7 +1407,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
             response_msg = response.choices[0].message
 
-            # If the model didn't call any tools:
+            # If the model produced no tool calls, capture content and finish
             if not response_msg.tool_calls:
                 content = (response_msg.content or "").strip()
                 if not content and hasattr(response_msg, "reasoning_content"):
@@ -1416,7 +1417,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = content
                     break
 
-                # If content was empty after tool execution, force a direct plain-text completion WITHOUT tools parameter
+                # If content was empty after tools executed, force a plain text completion WITHOUT tools schema
                 if turn_count > 1:
                     tool_outputs = [
                         str(m.get("content", "")) for m in messages 
@@ -1425,7 +1426,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     try:
                         messages.append({
                             "role": "user",
-                            "content": "Synthesize the search/tool results above into a bulleted briefing for the user."
+                            "content": "Synthesize the results from the tool outputs above into a clear executive summary."
                         })
                         forced_res = groq_client.chat.completions.create(
                             model=GROQ_MODEL,
@@ -1440,14 +1441,14 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     except Exception:
                         pass
 
-                    # Direct fallback: output the search results directly
+                    # Direct fallback: return raw tool data so output is never lost
                     if tool_outputs:
                         reply_text = "Here are the latest search results retrieved:\n\n" + "\n\n".join(tool_outputs)
                     else:
-                        reply_text = "Action executed."
+                        reply_text = "Action completed."
                     break
                 else:
-                    reply_text = "Ready."
+                    reply_text = "Task executed."
                     break
                 
             # Clean assistant message payload to prevent unsupported field errors (e.g., annotations, refusal)
