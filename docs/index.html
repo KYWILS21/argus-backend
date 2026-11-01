@@ -23,6 +23,8 @@
       margin: 0;
       padding: 0;
       font-family: var(--font-mono);
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     body {
@@ -50,6 +52,8 @@
       backdrop-filter: blur(8px);
       box-shadow: 0 4px 20px rgba(0, 240, 255, 0.1);
       z-index: 10;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     .brand-title {
@@ -133,6 +137,8 @@
       padding: 30px 24px;
       position: relative;
       box-shadow: inset 0 0 15px rgba(0, 240, 255, 0.05);
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     .arc-reactor-box {
@@ -263,6 +269,8 @@
       border-radius: 4px;
       outline: none;
       transition: border-color 0.2s, box-shadow 0.2s;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .command-input:focus {
@@ -281,6 +289,7 @@
       letter-spacing: 1px;
       transition: all 0.2s;
       font-size: 0.8rem;
+      user-select: none;
     }
 
     .hud-btn:hover {
@@ -296,6 +305,8 @@
       display: flex;
       flex-direction: column;
       gap: 16px;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .log-line {
@@ -308,6 +319,9 @@
       background: rgba(10, 20, 36, 0.45);
       border-left: 3px solid var(--cyan-primary);
       border-radius: 4px;
+      position: relative;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .log-line.user {
@@ -331,6 +345,8 @@
       font-size: 0.75rem;
       letter-spacing: 1.5px;
       text-transform: uppercase;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .log-line.user .log-sender {
@@ -350,6 +366,8 @@
       font-size: 0.88rem;
       line-height: 1.6;
       word-break: break-word;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     /* Rendered Markdown Styling */
@@ -378,11 +396,15 @@
       margin: 0.8rem 0;
       font-size: 0.84rem;
       background: rgba(3, 10, 20, 0.4);
+      -webkit-user-select: text;
+      user-select: text;
     }
     .log-content th, .log-content td {
       border: 1px solid var(--cyan-dim);
       padding: 7px 12px;
       text-align: left;
+      -webkit-user-select: text;
+      user-select: text;
     }
     .log-content th {
       background: rgba(0, 240, 255, 0.12);
@@ -401,6 +423,8 @@
       padding: 0.15rem 0.35rem;
       border-radius: 3px;
       font-size: 0.82rem;
+      -webkit-user-select: text;
+      user-select: text;
     }
     .log-content pre {
       background: #040810;
@@ -409,6 +433,8 @@
       border-radius: 4px;
       margin: 0.5rem 0;
       overflow-x: auto;
+      -webkit-user-select: text;
+      user-select: text;
     }
     .log-content a {
       color: var(--cyan-primary);
@@ -441,6 +467,8 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     .drawer-title {
@@ -470,6 +498,8 @@
       display: flex;
       flex-direction: column;
       gap: 12px;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .hud-card {
@@ -492,6 +522,8 @@
       justify-content: space-between;
       font-size: 0.7rem;
       opacity: 0.8;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .badge-canvas {
@@ -508,6 +540,8 @@
       font-size: 0.85rem;
       color: #e0f7fa;
       line-height: 1.4;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .memory-del-btn {
@@ -520,6 +554,8 @@
       cursor: pointer;
       border-radius: 3px;
       letter-spacing: 1px;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     .memory-del-btn:hover {
@@ -659,6 +695,13 @@
       let audioSource = null;
       let animFrameId = null;
 
+      // Real-Time Audio VAD Silence Tracker
+      let vadInterval = null;
+      let speechStarted = false;
+      let lastSpeechTime = 0;
+      const SILENCE_TIMEOUT_MS = 1500;
+      const ENERGY_THRESHOLD = 25;
+
       // Wake-word recognition instance
       let wakeRecognizer = null;
       let isWakeListening = false;
@@ -694,7 +737,6 @@
       canvas.width = canvas.clientWidth * window.devicePixelRatio || 340;
       canvas.height = canvas.clientHeight * window.devicePixelRatio || 85;
 
-      // Configure Marked parser
       if (typeof marked !== "undefined") {
         marked.setOptions({
           gfm: true,
@@ -702,7 +744,6 @@
         });
       }
 
-      // Synth Chime (Audio Cues)
       function playChime(freq = 880, type = "sine", duration = 0.12) {
         try {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -720,7 +761,6 @@
         } catch (e) {}
       }
 
-      // Populate Audio Input Devices
       async function populateMicrophones() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
         try {
@@ -753,7 +793,6 @@
 
       populateMicrophones();
 
-      // UI Toggles
       btnToggleInput.addEventListener("click", () => {
         optionalPromptDock.classList.toggle("visible");
         btnToggleInput.classList.toggle("active");
@@ -976,7 +1015,6 @@
         localStorage.setItem("argus_session_id", sessionId);
       }
 
-      // Robust Markdown Terminal Append Log
       function appendLog(sender, text, type = "normal") {
         const line = document.createElement("div");
         line.className = `log-line ${type}`;
@@ -1000,7 +1038,6 @@
         terminal.scrollTop = terminal.scrollHeight;
       }
 
-      // Visualizer
       function initVisualizer(clonedStream) {
         if (!audioCtx) {
           const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1129,7 +1166,6 @@
 
         const cleanMessage = message.trim();
 
-        // Built-in session reset command
         if (cleanMessage.toLowerCase() === "/reset" || cleanMessage.toLowerCase() === "clear") {
           sessionId = crypto.randomUUID();
           localStorage.setItem("argus_session_id", sessionId);
@@ -1182,18 +1218,61 @@
         }
       }
 
-      // Audio Recording Pipeline
+      // Voice Activity Detection (VAD) Loop
+      function startVadLoop() {
+        if (vadInterval) clearInterval(vadInterval);
+        speechStarted = false;
+        lastSpeechTime = Date.now();
+
+        vadInterval = setInterval(() => {
+          if (!isRecording || !analyser) return;
+
+          const data = new Uint8Array(analyser.frequencyBinCount);
+          analyser.getByteFrequencyData(data);
+
+          let sum = 0;
+          for (let i = 0; i < data.length; i++) {
+            sum += data[i];
+          }
+          const avgVolume = sum / data.length;
+
+          if (avgVolume > ENERGY_THRESHOLD) {
+            speechStarted = true;
+            lastSpeechTime = Date.now();
+          } else {
+            const silenceDuration = Date.now() - lastSpeechTime;
+            
+            // Auto-stop after speech finishes and silence persists
+            if (speechStarted && silenceDuration > SILENCE_TIMEOUT_MS) {
+              clearInterval(vadInterval);
+              vadInterval = null;
+              stopRecording();
+            }
+            // Auto-stop if 8s pass without speech
+            else if (!speechStarted && (Date.now() - recordingStartTime) > 8000) {
+              clearInterval(vadInterval);
+              vadInterval = null;
+              stopRecording();
+            }
+          }
+        }, 100);
+      }
+
+      function stopVadLoop() {
+        if (vadInterval) {
+          clearInterval(vadInterval);
+          vadInterval = null;
+        }
+      }
+
       async function startRecording() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           appendLog("ERROR", "Microphone access requires HTTPS.", "error");
           return;
         }
 
-        // Barge-in: cut off any speaking TTS immediately
         if (window.speechSynthesis) window.speechSynthesis.cancel();
         reactorBox.classList.remove("speaking");
-
-        // Temporarily pause passive wake recognizer to avoid resource lock
         stopWakeWordEngine();
 
         try {
@@ -1238,6 +1317,8 @@
           };
 
           mediaRecorder.onstop = async () => {
+            stopVadLoop();
+
             if (visualizerStream) {
               visualizerStream.getTracks().forEach(t => t.stop());
               visualizerStream = null;
@@ -1258,7 +1339,7 @@
             appendLog("SYSTEM", `Captured ${audioBlob.size} bytes over ${durationSec}s.`, "system");
 
             if (audioBlob.size < 1500) {
-              appendLog("SYSTEM", "Sample contained no audio payload frames. Speak a full command before stopping.", "system");
+              appendLog("SYSTEM", "Sample contained no audio payload frames.", "system");
               voiceLabel.textContent = wakeWordEnabled ? 'SAY "ARGUS" OR CLICK CORE' : "CLICK ARC CORE TO TRANSMIT";
               if (statusTools) statusTools.textContent = "SYSTEM IDLE";
               if (wakeWordEnabled) startWakeWordEngine();
@@ -1306,8 +1387,9 @@
           mediaRecorder.start();
           isRecording = true;
           reactorBox.classList.add("recording");
-          voiceLabel.textContent = "LISTENING... CLICK CORE WHEN FINISHED";
-          playChime(1046, "sine", 0.15); // High affirmation ping (C6)
+          voiceLabel.textContent = "LISTENING... (AUTO-SENDS ON SILENCE)";
+          playChime(1046, "sine", 0.15);
+          startVadLoop();
 
         } catch (err) {
           appendLog("ERROR", `Hardware access error: ${err.name} - ${err.message}`, "error");
@@ -1317,9 +1399,10 @@
       }
 
       function stopRecording() {
+        stopVadLoop();
         if (mediaRecorder && mediaRecorder.state === "recording") {
           mediaRecorder.stop();
-          playChime(523, "sine", 0.15); // Low closing ping (C5)
+          playChime(523, "sine", 0.15);
         }
         isRecording = false;
         reactorBox.classList.remove("recording");
@@ -1333,7 +1416,6 @@
         }
       }
 
-      // Continuous Wake Word Engine ("ARGUS")
       function initWakeWordEngine() {
         const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognitionClass) {
@@ -1354,7 +1436,6 @@
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             const transcript = event.results[i][0].transcript.trim().toLowerCase();
 
-            // Match "argus", "argos", or "hey argus"
             if (transcript.includes("argus") || transcript.includes("argos") || transcript.includes("august")) {
               appendLog("SYSTEM", `Wake-word triggered ("${transcript}"). Engaging capture...`, "system");
               wakeRecognizer.stop();
@@ -1372,7 +1453,6 @@
 
         wakeRecognizer.onend = () => {
           isWakeListening = false;
-          // Auto-restart loop if still enabled and not actively recording high-def stream
           if (wakeWordEnabled && !isRecording) {
             try {
               wakeRecognizer.start();
@@ -1407,7 +1487,6 @@
         }, 200);
       }
 
-      // Initialize wake word on load
       initWakeWordEngine();
       if (wakeWordEnabled) {
         startWakeWordEngine();

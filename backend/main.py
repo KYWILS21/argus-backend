@@ -490,7 +490,6 @@ def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = N
             due_at = a.get("due_at", "No due date specified")
             points = a.get("points_possible", "N/A")
             
-            # Clean HTML tags and excessive spacing out of description snippets
             desc_raw = a.get("description", "") or "No description provided."
             clean_desc = re.sub(r'<[^>]+>', ' ', desc_raw)
             clean_desc = " ".join(clean_desc.split())[:350]
@@ -529,7 +528,6 @@ def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = 
             sub = _canvas_api_request(endpoint)
             submissions = [sub] if sub else []
         else:
-            # Fallback path directly handling self-assessment endpoint safely
             endpoint = f"/courses/{course_id}/students/submissions/self?include[]=assignment&include[]=submission_comments&include[]=rubric_assessment&per_page=10"
             try:
                 submissions = _canvas_api_request(endpoint)
@@ -667,7 +665,6 @@ def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
 # ==============================================================================
 
 def web_search_tool(query: str, max_results: int = 5) -> str:
-    # 1. Primary DDGS API Attempt
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -682,7 +679,6 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     except Exception:
         pass
 
-    # 2. Resilient Direct HTML Scraper Fallback
     try:
         clean_q = urllib.parse.quote(query)
         url = f"https://html.duckduckgo.com/html/?q={clean_q}"
@@ -1017,11 +1013,36 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
         f"### Canvas & Google Calendar // Next 48 Hours\n{agenda_block}\n"
     )
 
+def dispatch_contact_message(recipient_name: str, message_body: str) -> str:
+    """Prepares an outbound SMS message to be dispatched to a personal contact."""
+    return f"Prepared SMS dispatch to {recipient_name}: '{message_body}'"
+
 # ==============================================================================
 # Tool Schema Declarations & Dispatch
 # ==============================================================================
 
 tools_schema = [
+    {
+        "type": "function",
+        "function": {
+            "name": "dispatch_contact_message",
+            "description": "Used when the user requests to text, SMS, or message an individual person from their personal iPhone contacts list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient_name": {
+                        "type": "string",
+                        "description": "The exact first or full name of the contact as saved in the phone book (e.g., 'Bryant Basketball', 'Mom', 'Alex')."
+                    },
+                    "message_body": {
+                        "type": "string",
+                        "description": "The text message content to send."
+                    }
+                },
+                "required": ["recipient_name", "message_body"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -1355,6 +1376,7 @@ tools_schema = [
 ]
 
 tool_dispatch = {
+    "dispatch_contact_message": dispatch_contact_message,
     "get_weather": get_weather,
     "canvas_list_courses": canvas_list_courses,
     "canvas_get_assignment_rubric": canvas_get_assignment_rubric,
@@ -1390,6 +1412,9 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
+    action: Optional[str] = "reply"
+    recipient: Optional[str] = None
+    body: Optional[str] = None
 
 @app.get("/health")
 def health_check():
@@ -1478,11 +1503,12 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     system_prompt = (
         f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
-        "You have direct execution powers over Canvas, Gmail, Google Calendar, GitHub, Weather, Web Search, and SQLite memory.\n\n"
+        "You have direct execution powers over Contacts Messaging, Canvas, Gmail, Google Calendar, GitHub, Weather, Web Search, and SQLite memory.\n\n"
         "=== PERMANENT LONG-TERM FACTS (GROUND TRUTH) ===\n"
         f"{facts_block}\n"
         "===============================================\n\n"
         "OPERATIONAL DIRECTIVE:\n"
+        "- When the user asks to text, SMS, or message a contact (e.g. 'Text Bryant Basketball', 'Message Mom'), YOU MUST CALL THE 'dispatch_contact_message' tool.\n"
         "- If the user asks about personal preferences, rules, or saved information, CONSULT THE PERMANENT LONG-TERM FACTS ABOVE.\n"
         "- If a preference or fact is listed there (e.g. favorite algorithm), state it immediately as verified truth.\n"
         "- Execute appropriate tools to fulfill the user's intent.\n"
@@ -1503,6 +1529,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     reply_text = ""
     max_turns = 4
     turn_count = 0
+    contact_action = None
+    contact_recipient = None
+    contact_body = None
 
     try:
         while turn_count < max_turns:
@@ -1573,7 +1602,6 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     except Exception as synth_err:
                         print(f"Forced synthesis error: {synth_err}")
 
-                    # Direct fallback: dump the collected tool outputs
                     if tool_outputs:
                         reply_text = "\n\n".join(tool_outputs)
                     else:
@@ -1612,6 +1640,21 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     except Exception:
                         fn_args = {}
 
+                # Intercept contact messaging to immediately package iOS Shortcut payload
+                if fn_name == "dispatch_contact_message":
+                    contact_recipient = fn_args.get("recipient_name", "")
+                    contact_body = fn_args.get("message_body", "")
+                    contact_action = "send_contact_sms"
+                    reply_text = f"Dispatched text to {contact_recipient}."
+                    save_message(session_id, "assistant", reply_text)
+                    return ChatResponse(
+                        reply=reply_text,
+                        session_id=session_id,
+                        action=contact_action,
+                        recipient=contact_recipient,
+                        body=contact_body
+                    )
+
                 if fn_name in tool_dispatch:
                     try:
                         fn_result = tool_dispatch[fn_name](**fn_args)
@@ -1648,4 +1691,10 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     if reply_text and reply_text.strip():
         save_message(session_id, "assistant", reply_text.strip())
 
-    return ChatResponse(reply=reply_text, session_id=session_id)
+    return ChatResponse(
+        reply=reply_text, 
+        session_id=session_id,
+        action=contact_action or "reply",
+        recipient=contact_recipient,
+        body=contact_body
+    )
