@@ -985,11 +985,12 @@ def restaurant_reservation_tool(restaurant_name: str, location: str, party_size:
         f"**Venue Intel:**\n{search_info[:400]}"
     )
 
-def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
+def executive_briefing_tool(location: Optional[str] = "Philadelphia, PA") -> str:
+    target_loc = location.strip() if location and location.strip() else "Philadelphia, PA"
     now = datetime.datetime.now()
     today_str = now.strftime("%A, %B %d, %Y")
     
-    weather_intel = get_weather(location)
+    weather_intel = get_weather(target_loc)
     gmail_intel = gmail_search_messages(query="is:unread", max_results=4)
 
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone().isoformat()
@@ -1008,7 +1009,7 @@ def executive_briefing_tool(location: str = "Philadelphia, PA") -> str:
 
     return (
         f"## EXECUTIVE BRIEFING FOR {today_str.upper()}\n\n"
-        f"### Local Weather ({location})\n{weather_intel}\n\n"
+        f"### Local Weather ({target_loc})\n{weather_intel}\n\n"
         f"### Actionable Inbox // Unread Messages\n{gmail_intel}\n\n"
         f"### Canvas & Google Calendar // Next 48 Hours\n{agenda_block}\n"
     )
@@ -1040,6 +1041,38 @@ tools_schema = [
                     }
                 },
                 "required": ["recipient_name", "message_body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "executive_briefing_tool",
+            "description": "Compiles a complete morning briefing chaining live weather, unread emails from Gmail, and upcoming Canvas & Google Calendar events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City and state for weather lookup. Defaults to 'Philadelphia, PA' if null or omitted."
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exec_briefing_tool",
+            "description": "Alias for executive_briefing_tool. Compiles an executive briefing of weather, unread emails, and schedule.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City and state for weather lookup. Defaults to 'Philadelphia, PA'."
+                    }
+                }
             }
         }
     },
@@ -1095,19 +1128,6 @@ tools_schema = [
                     "assignment_id": {"type": "string", "description": "Optional specific numerical assignment ID. If omitted, returns recent submissions."}
                 },
                 "required": ["course_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "executive_briefing_tool",
-            "description": "Compiles a complete morning briefing chaining live weather, unread emails from Gmail, and upcoming Canvas & Google Calendar events.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City and state for weather lookup."}
-                }
             }
         }
     },
@@ -1377,11 +1397,12 @@ tools_schema = [
 
 tool_dispatch = {
     "dispatch_contact_message": dispatch_contact_message,
+    "executive_briefing_tool": executive_briefing_tool,
+    "exec_briefing_tool": executive_briefing_tool,
     "get_weather": get_weather,
     "canvas_list_courses": canvas_list_courses,
     "canvas_get_assignment_rubric": canvas_get_assignment_rubric,
     "canvas_get_submission_grades": canvas_get_submission_grades,
-    "executive_briefing_tool": executive_briefing_tool,
     "gmail_search_messages": gmail_search_messages,
     "gmail_read_message": gmail_read_message,
     "gmail_create_draft": gmail_create_draft,
@@ -1509,6 +1530,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         "===============================================\n\n"
         "OPERATIONAL DIRECTIVE:\n"
         "- When the user asks to text, SMS, or message a contact (e.g. 'Text Bryant Basketball', 'Message Mom'), YOU MUST CALL THE 'dispatch_contact_message' tool.\n"
+        "- When the user asks for a briefing, executive update, or morning summary, call 'executive_briefing_tool'.\n"
         "- If the user asks about personal preferences, rules, or saved information, CONSULT THE PERMANENT LONG-TERM FACTS ABOVE.\n"
         "- If a preference or fact is listed there (e.g. favorite algorithm), state it immediately as verified truth.\n"
         "- Execute appropriate tools to fulfill the user's intent.\n"
@@ -1555,10 +1577,15 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                     reply_text = "Groq rate limit reached. Please wait a moment and try again."
                     break
                 except Exception as api_err:
-                    if attempt < 2 and "429" in str(api_err):
+                    err_str = str(api_err)
+                    if "exec_briefing_tool" in err_str:
+                        # Fallback for hallucinated tool name
+                        reply_text = executive_briefing_tool("Philadelphia, PA")
+                        break
+                    if attempt < 2 and "429" in err_str:
                         time.sleep(2.0)
                         continue
-                    reply_text = f"Groq API error: {str(api_err)}"
+                    reply_text = f"Groq API error: {err_str}"
                     break
 
             if reply_text or not response or not response.choices:
@@ -1657,7 +1684,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
                 if fn_name in tool_dispatch:
                     try:
-                        fn_result = tool_dispatch[fn_name](**fn_args)
+                        # Clean arguments: remove None values so defaults can take effect
+                        clean_fn_args = {k: v for k, v in fn_args.items() if v is not None}
+                        fn_result = tool_dispatch[fn_name](**clean_fn_args)
                     except Exception as exc:
                         fn_result = f"Tool failure: {type(exc).__name__} - {str(exc)}"
                 else:
