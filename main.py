@@ -393,6 +393,63 @@ def _normalize_iso_time(time_str: str) -> str:
         clean += "-04:00"
     return clean
 
+def get_drive_service():
+    creds = get_google_credentials()
+    if not creds:
+        return None
+    try:
+        return build("drive", "v3", credentials=creds)
+    except Exception:
+        return None
+
+def drive_search_tool(query: str, max_results: int = 5) -> str:
+    """Searches Google Drive and Google Docs using full-text query matching across titles and contents."""
+    service = get_drive_service()
+    if not service:
+        return "Google Drive integration is not active or OAuth credentials need updating."
+
+    try:
+        # fullText searches within Google Docs, PDFs, slides, and plain text
+        # name contains searches filenames
+        clean_q = query.replace("'", "\\'")
+        drive_query = (
+            f"(name contains '{clean_q}' or fullText contains '{clean_q}') "
+            "and trashed = false"
+        )
+
+        results = service.files().list(
+            q=drive_query,
+            pageSize=max_results,
+            fields="files(id, name, mimeType, webViewLink, modifiedTime, description)"
+        ).execute()
+
+        files = results.get("files", [])
+        if not files:
+            return f"No Google Drive or Docs files found matching: '{query}'."
+
+        output = []
+        for f in files:
+            name = f.get("name", "Untitled")
+            link = f.get("webViewLink", "")
+            mime = f.get("mimeType", "")
+            mod_time = f.get("modifiedTime", "")[:10]
+            
+            # Map MIME types to clean labels
+            type_label = "Doc" if "document" in mime else (
+                "Sheet" if "spreadsheet" in mime else (
+                    "Slide" if "presentation" in mime else (
+                        "PDF" if "pdf" in mime else "File"
+                    )
+                )
+            )
+
+            output.append(f"- **[{type_label}] [{name}]({link})**\n  *Last Modified:* {mod_time}")
+
+        return f"### Google Drive Search Results for '{query}'\n\n" + "\n\n".join(output)
+
+    except Exception as e:
+        return f"Google Drive search error: {str(e)}"
+
 # ==============================================================================
 # Weather Integration Tool
 # ==============================================================================
@@ -1498,6 +1555,27 @@ tools_schema = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "drive_search_tool",
+            "description": "Searches Google Drive and Google Docs by keyword across file titles and full body content. Use when the user asks to find, search, or look up notes, slides, documents, or coursework stored in Drive.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search keyword, topic, or document title."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of files to return (default 5)."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 tool_dispatch = {
@@ -1528,6 +1606,7 @@ tool_dispatch = {
     "google_search_grounding": google_search_grounding,
     "google_search_tool": google_search_grounding,
     "web_search_tool": google_search_grounding,
+    "drive_search_tool": drive_search_tool,
 }
 
 # ==============================================================================
