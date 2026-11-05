@@ -1625,25 +1625,39 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     session_id = request.session_id or "default_session"
     user_input = request.message.strip()
 
+    # Fast-path intent heuristics for voice and text shorthand
+    clean_lower = user_input.lower().strip()
+    
+    # Texting / Messaging intents
+    # Matches: "tell [Name] ...", "text [Name] ...", "msg [Name] ...", "let [Name] know ..."
+    msg_match = re.match(r'^(?:yo argus[, ]*)?(?:tell|text|msg|message|send a text to|let)\s+([a-zA-Z0-9\s]+?)\s+(?:that|to|saying|:)?\s*(.+)$', clean_lower, re.IGNORECASE)
+    
+    # If a clear text directive is detected and Groq might bypass it, enforce tool choice
+    force_tool_choice = "auto"
+    if any(clean_lower.startswith(prefix) for prefix in ["text ", "tell ", "msg ", "message "]):
+        force_tool_choice = {"type": "function", "function": {"name": "dispatch_contact_message"}}
+
     # Define timestamps and memory facts BEFORE building system_prompt
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     facts = list_facts()
     facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
 
     system_prompt = (
-        f"You are ARGUS, an autonomous executive AI assistant. Current time: {current_time_str}.\n"
-        "You have direct execution powers over Contacts Messaging, Canvas, Gmail, Google Calendar, GitHub, Weather, Web Search, and SQLite memory.\n\n"
+        f"You are ARGUS, an adaptive autonomous executive AI assistant. Current time: {current_time_str}.\n"
+        "You possess advanced intent detection trained on conversational speech-to-text dictation and fast keyboard texting.\n\n"
+        "=== COMMUNICATION & INTENT INTERPRETATION PROTOCOL ===\n"
+        "- **Speech Dictation Adaptation**: The user may dictate hands-free via voice, resulting in run-on sentences, phonetic slips, or filler words ('yo ARGUS', 'uh', 'like', 'can you just go ahead and'). Strip conversational padding and isolate the underlying directive.\n"
+        "- **Keyboard Texting / Shorthand Adaptation**: The user may text informally using slang, abbreviations, or shorthand (e.g., 'aight', 'imma', 'hmu', 'sched', 'msg', 'tmrw', 'rn', 'wuts'). Interpret these fluently without lecturing or asking for rephrasing.\n"
+        "- **Ambiguous Contact Directives**: Phrasings like 'tell Bryant we hit the gym at 6', 'let Mom know I'm on the way', 'text alex whats up' MUST be resolved directly as `dispatch_contact_message`.\n"
+        "- **Contextual Summaries**: If the user says 'summarize it', 'clean that up', or 'break that down' following a data fetch or search, synthesize existing chat history into executive bullet points without invoking web search tools again.\n\n"
         "=== PERMANENT LONG-TERM FACTS (GROUND TRUTH) ===\n"
         f"{facts_block}\n"
         "===============================================\n\n"
-        "OPERATIONAL DIRECTIVE:\n"
-        "- If recent chat history already contains search results, data, or raw text and the user asks to summarize, explain, or format it, DO NOT call search tools again. Synthesize the existing context directly into clean, executive markdown.\n"
-        "- When the user asks to text, SMS, or message a contact (e.g. 'Text Bryant Basketball', 'Message Mom'), YOU MUST CALL THE 'dispatch_contact_message' tool.\n"
-        "- When the user asks for a briefing, executive update, or morning summary, call 'executive_briefing_tool'.\n"
-        "- If the user asks about personal preferences, rules, or saved information, CONSULT THE PERMANENT LONG-TERM FACTS ABOVE.\n"
-        "- If a preference or fact is listed there (e.g. favorite algorithm), state it immediately as verified truth.\n"
-        "- Execute appropriate tools to fulfill the user's intent.\n"
-        "- Always provide a full, structured markdown answer summarizing tool outputs with clear headers, tables, and bold formatting."
+        "OPERATIONAL DIRECTIVES:\n"
+        "1. For texting/messaging people: call 'dispatch_contact_message' with exact contact name and cleaned message body.\n"
+        "2. For briefings/morning updates/day overviews: call 'executive_briefing_tool'.\n"
+        "3. For real-time facts/sports/news: call 'google_search_grounding'.\n"
+        "4. Output format: Clear, concise executive markdown with bold highlights and structured lists."
     )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -1675,7 +1689,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                         model=GROQ_MODEL,
                         messages=messages,
                         tools=tools_schema,
-                        tool_choice="auto",
+                        tool_choice=force_tool_choice,
                         temperature=0.3
                     )
                     break
