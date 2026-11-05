@@ -427,18 +427,20 @@ def google_search_grounding(query: str) -> str:
     if not gemini_key:
         return "GEMINI_API_KEY is not configured on Render."
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    # Use the stable model endpoint syntax
+    model_name = "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": query}]}],
-        "tools": [{"google_search": {}}],
-        "systemInstruction": {
-            "parts": [{
-                "text": (
-                    "You are the real-time research engine for ARGUS. "
-                    "Synthesize current, grounded web facts directly. Include relevant markdown links and source citations."
-                )
-            }]
-        }
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": query}]
+            }
+        ],
+        "tools": [
+            {"google_search": {}}
+        ]
     }
 
     req = urllib.request.Request(
@@ -460,7 +462,7 @@ def google_search_grounding(query: str) -> str:
         ]
         grounded_text = "".join(text_parts).strip()
 
-        # Extract source grounding metadata and links
+        # Extract source citations and URLs
         metadata = candidate.get("groundingMetadata", {})
         chunks = metadata.get("groundingChunks", [])
         sources = []
@@ -479,10 +481,11 @@ def google_search_grounding(query: str) -> str:
 
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode("utf-8")
-        return f"Google Search Grounding HTTP {e.code}: {err_msg}"
+        # Direct fallback to DDGS scraper if the Gemini endpoint is temporarily unreachable
+        fallback_results = web_search_tool(query)
+        return f"{fallback_results}\n\n*(Note: Grounding endpoint returned HTTP {e.code}; served via resilient fallback)*"
     except Exception as e:
-        return f"Google Search Grounding failed: {str(e)}"
-
+        return web_search_tool(query)
 
 # ==============================================================================
 # Canvas REST API Client & Sanitized Extraction Tools
