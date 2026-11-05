@@ -1481,6 +1481,23 @@ tools_schema = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "google_search_tool",
+            "description": "Alias for google_search_grounding. Performs an authoritative live web search using Google Search Grounding.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 tool_dispatch = {
@@ -1509,6 +1526,7 @@ tool_dispatch = {
     "delete_calendar_event": delete_calendar_event,
     "send_iphone_push": send_iphone_push, 
     "google_search_grounding": google_search_grounding,
+    "google_search_tool": google_search_grounding,
     "web_search_tool": google_search_grounding,
 }
 
@@ -1619,6 +1637,7 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
         f"{facts_block}\n"
         "===============================================\n\n"
         "OPERATIONAL DIRECTIVE:\n"
+        "- If recent chat history already contains search results, data, or raw text and the user asks to summarize, explain, or format it, DO NOT call search tools again. Synthesize the existing context directly into clean, executive markdown.\n"
         "- When the user asks to text, SMS, or message a contact (e.g. 'Text Bryant Basketball', 'Message Mom'), YOU MUST CALL THE 'dispatch_contact_message' tool.\n"
         "- When the user asks for a briefing, executive update, or morning summary, call 'executive_briefing_tool'.\n"
         "- If the user asks about personal preferences, rules, or saved information, CONSULT THE PERMANENT LONG-TERM FACTS ABOVE.\n"
@@ -1756,6 +1775,10 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
                         fn_args = json.loads(tool_call.function.arguments)
                     except Exception:
                         fn_args = {}
+
+                # Route any search-related hallucinated name to google_search_grounding
+                if "search" in fn_name and fn_name not in tool_dispatch:
+                    fn_name = "google_search_grounding"
 
                 # Intercept contact messaging to immediately package iOS Shortcut payload
                 if fn_name == "dispatch_contact_message":
