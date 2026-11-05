@@ -416,6 +416,74 @@ def get_weather(location: str = "Philadelphia") -> str:
     except Exception as exc:
         return f"Weather report currently unavailable for {location}: {str(exc)}"
 
+
+# ==============================================================================
+# Google Searching integration
+# ==============================================================================
+
+def google_search_grounding(query: str) -> str:
+    """Executes native Google Search Grounding via Gemini, returning synthesized results with cited source links."""
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not gemini_key:
+        return "GEMINI_API_KEY is not configured on Render."
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": query}]}],
+        "tools": [{"google_search": {}}],
+        "systemInstruction": {
+            "parts": [{
+                "text": (
+                    "You are the real-time research engine for ARGUS. "
+                    "Synthesize current, grounded web facts directly. Include relevant markdown links and source citations."
+                )
+            }]
+        }
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        candidate = data.get("candidates", [{}])[0]
+        text_parts = [
+            p.get("text", "") 
+            for p in candidate.get("content", {}).get("parts", []) 
+            if "text" in p
+        ]
+        grounded_text = "".join(text_parts).strip()
+
+        # Extract source grounding metadata and links
+        metadata = candidate.get("groundingMetadata", {})
+        chunks = metadata.get("groundingChunks", [])
+        sources = []
+        for c in chunks:
+            web = c.get("web", {})
+            title = web.get("title") or "Source"
+            uri = web.get("uri")
+            if uri and uri not in [s[1] for s in sources]:
+                sources.append((title, uri))
+
+        if sources:
+            source_block = "\n\n**Verified Sources:**\n" + "\n".join([f"- [{t}]({u})" for t, u in sources[:4]])
+            return f"{grounded_text}{source_block}"
+
+        return grounded_text or "No grounded search data could be extracted."
+
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8")
+        return f"Google Search Grounding HTTP {e.code}: {err_msg}"
+    except Exception as e:
+        return f"Google Search Grounding failed: {str(e)}"
+
+
 # ==============================================================================
 # Canvas REST API Client & Sanitized Extraction Tools
 # ==============================================================================
@@ -1393,6 +1461,23 @@ tools_schema = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "google_search_grounding",
+            "description": "Performs an authoritative live web search using Google Search Grounding. Use for real-time news, current sports scores, research papers, documentation, or facts requiring live verification.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The precise search query."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 tool_dispatch = {
@@ -1419,7 +1504,9 @@ tool_dispatch = {
     "create_calendar_event": create_calendar_event,
     "update_calendar_event": update_calendar_event,
     "delete_calendar_event": delete_calendar_event,
-    "send_iphone_push": send_iphone_push
+    "send_iphone_push": send_iphone_push, 
+    "google_search_grounding": google_search_grounding,
+    "web_search_tool": google_search_grounding,
 }
 
 # ==============================================================================
