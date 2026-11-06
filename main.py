@@ -156,15 +156,24 @@ async def favicon():
     return Response(status_code=204)
 
 
-def generate_client_website_tool(business_name: str, niche: str, location: str, contact_phone: str = "", highlights: str = "") -> str:
+def generate_client_website_tool(
+    business_name: str, 
+    niche: str, 
+    location: str, 
+    contact_phone: str = None, 
+    highlights: str = None
+) -> str:
     """
     Generates a responsive, modern HTML5/TailwindCSS landing page for a local business,
     saves it locally, and generates a public live preview URL.
     """
+    phone = contact_phone if contact_phone else "(215) 555-0199"
+    key_highlights = highlights if highlights else "Locally owned, top-rated service, high quality ingredients"
+
     slug = "".join(c for c in business_name.lower() if c.isalnum() or c == "-").strip("-")
     if not slug:
         slug = f"demo-{int(time.time())}"
-
+        
     # Generate bespoke site code using Gemini
     gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not gemini_key:
@@ -1662,15 +1671,30 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "generate_client_website_tool",
-            "description": "Generates a fully responsive, modern demo landing page for a local business (food, home services, contractors, retail) and deploys it to a live preview URL for pitch outreach.",
+            "description": "Generates a responsive, modern demo landing page for a local business (food, home services, contractors, retail) and deploys it to a live preview URL for pitch outreach.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "business_name": {"type": "string", "description": "Name of the business (e.g., 'Tony\\'s Pizzeria', 'Philly Apex Plumbing')"},
-                    "niche": {"type": "string", "description": "Type of business (e.g. 'Italian Restaurant', 'HVAC & Plumbing', 'Auto Detailing')"},
-                    "location": {"type": "string", "description": "City or service area (e.g. 'Philadelphia, PA')"},
-                    "contact_phone": {"type": "string", "description": "Optional phone number to embed on the site"},
-                    "highlights": {"type": "string", "description": "Key services, menu items, or value propositions"}
+                    "business_name": {
+                        "type": "string",
+                        "description": "Name of the business (e.g., 'Angelo\\'s Pizzeria')"
+                    },
+                    "niche": {
+                        "type": "string",
+                        "description": "Type of business (e.g., 'Italian Restaurant', 'HVAC & Plumbing')"
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "City or service area (e.g., 'South Philadelphia, PA')"
+                    },
+                    "contact_phone": {
+                        "type": ["string", "null"],
+                        "description": "Optional phone number. Pass null or empty string if unknown."
+                    },
+                    "highlights": {
+                        "type": ["string", "null"],
+                        "description": "Key services, menu items, or value propositions. Pass null if none provided."
+                    }
                 },
                 "required": ["business_name", "niche", "location"]
             }
