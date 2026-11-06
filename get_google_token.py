@@ -2,14 +2,38 @@ import os
 import json
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# The scopes required by ARGUS
+# Complete master scopes for ARGUS
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/drive.readonly"
+    "https://www.googleapis.com/auth/drive.readonly"  # Permanent Drive scope
 ]
+
+def generate_tokens():
+    flow = InstalledAppFlow.from_client_secrets_file(
+        "credentials.json", # or client_secret.json
+        scopes=SCOPES
+    )
+    
+    # CRITICAL: prompt='consent' forces Google to mint a fresh Refresh Token
+    # access_type='offline' allows ARGUS to refresh tokens autonomously
+    creds = flow.run_local_server(
+        port=0,
+        access_type="offline",
+        prompt="consent"
+    )
+
+    print("\n" + "="*50)
+    print("PERMANENT OAUTH CREDENTIALS FOR RENDER")
+    print("="*50)
+    print(f"GOOGLE_REFRESH_TOKEN={creds.refresh_token}")
+    print(f"ACCESS_TOKEN={creds.token}")
+    print("="*50 + "\n")
+
+if __name__ == "__main__":
+    generate_tokens()
 
 def main():
     # Uses your credentials JSON downloaded from Google Cloud Console

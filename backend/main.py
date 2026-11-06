@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from groq import Groq, RateLimitError
+from fastapi.responses import HTMLResponse
 
 try:
     from ddgs import DDGS
@@ -31,6 +32,20 @@ try:
     GOOGLE_APIS_AVAILABLE = True
 except ImportError:
     GOOGLE_APIS_AVAILABLE = False
+
+
+# Create a demos directory
+DEMO_DIR = os.path.join(os.path.dirname(__file__), "generated_demos")
+os.makedirs(DEMO_DIR, exist_ok=True)
+
+@app.get("/preview/{slug}", response_class=HTMLResponse)
+def serve_client_demo(slug: str):
+    safe_slug = "".join(c for c in slug if c.isalnum() or c in ("-", "_")).lower()
+    file_path = os.path.join(DEMO_DIR, f"{safe_slug}.html")
+    if not os.path.exists(file_path):
+        return HTMLResponse(content="<h1>404 Demo Site Not Found</h1>", status_code=404)
+    with open(file_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 # ==============================================================================
 # Configuration & Initialization
@@ -139,6 +154,72 @@ async def cors_preflight_handler(rest_of_path: str):
 async def favicon():
     return Response(status_code=204)
 
+
+def generate_client_website_tool(business_name: str, niche: str, location: str, contact_phone: str = "", highlights: str = "") -> str:
+    """
+    Generates a responsive, modern HTML5/TailwindCSS landing page for a local business,
+    saves it locally, and generates a public live preview URL.
+    """
+    slug = "".join(c for c in business_name.lower() if c.isalnum() or c == "-").strip("-")
+    if not slug:
+        slug = f"demo-{int(time.time())}"
+
+    # Generate bespoke site code using Gemini
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not gemini_key:
+        return "GEMINI_API_KEY is required to generate website code."
+
+    prompt = f"""
+    Build a modern, high-converting, mobile-responsive single-page website for:
+    - Business Name: {business_name}
+    - Industry/Niche: {niche} (e.g. Italian Restaurant, Roofing Contractor, Plumbing)
+    - Location: {location}
+    - Phone: {contact_phone or '(555) 019-2834'}
+    - Selling Points / Highlights: {highlights or 'Fast service, licensed & insured, 5-star customer reviews'}
+
+    REQUIREMENTS:
+    - Complete, valid standalone HTML5 file with embedded Tailwind CSS via CDN (<script src="https://cdn.tailwindcss.com"></script>).
+    - Modern dark/light sleek aesthetics (clean typography, hero section with call-to-action button, services/menu grid, social proof/testimonials section, contact form, and footer).
+    - Mobile-responsive navigation bar.
+    - DO NOT use markdown code fences in your output. Return ONLY the raw valid HTML starting with <!DOCTYPE html>.
+    """
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.4}
+    }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        raw_html = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        # Clean potential markdown backticks if model includes them
+        if raw_html.startswith("```"):
+            lines = raw_html.splitlines()
+            raw_html = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+
+        file_path = os.path.join(DEMO_DIR, f"{slug}.html")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(raw_html)
+
+        preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
+        return (
+            f"### Website Generated Successfully for {business_name}\n"
+            f"- **Industry:** {niche}\n"
+            f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
+            f"- **File:** `generated_demos/{slug}.html`\n\n"
+            "Ready for outreach! Would you like me to draft a cold outreach email or dispatch a message?"
+        )
+    except Exception as e:
+        return f"Failed to generate site: {str(e)}"
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
     """Dispatches a push notification directly to user's iPhone via Pushover."""
@@ -1576,6 +1657,24 @@ tools_schema = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_client_website_tool",
+            "description": "Generates a fully responsive, modern demo landing page for a local business (food, home services, contractors, retail) and deploys it to a live preview URL for pitch outreach.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "business_name": {"type": "string", "description": "Name of the business (e.g., 'Tony\\'s Pizzeria', 'Philly Apex Plumbing')"},
+                    "niche": {"type": "string", "description": "Type of business (e.g. 'Italian Restaurant', 'HVAC & Plumbing', 'Auto Detailing')"},
+                    "location": {"type": "string", "description": "City or service area (e.g. 'Philadelphia, PA')"},
+                    "contact_phone": {"type": "string", "description": "Optional phone number to embed on the site"},
+                    "highlights": {"type": "string", "description": "Key services, menu items, or value propositions"}
+                },
+                "required": ["business_name", "niche", "location"]
+            }
+        }
+    },
 ]
 
 tool_dispatch = {
@@ -1607,6 +1706,7 @@ tool_dispatch = {
     "google_search_tool": google_search_grounding,
     "web_search_tool": google_search_grounding,
     "drive_search_tool": drive_search_tool,
+    "generate_client_website_tool": generate_client_website_tool
 }
 
 # ==============================================================================
