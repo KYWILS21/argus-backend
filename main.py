@@ -34,18 +34,6 @@ except ImportError:
     GOOGLE_APIS_AVAILABLE = False
 
 
-# Create a demos directory
-DEMO_DIR = os.path.join(os.path.dirname(__file__), "generated_demos")
-os.makedirs(DEMO_DIR, exist_ok=True)
-
-@app.get("/preview/{slug}", response_class=HTMLResponse)
-def serve_client_demo(slug: str):
-    safe_slug = "".join(c for c in slug if c.isalnum() or c in ("-", "_")).lower()
-    file_path = os.path.join(DEMO_DIR, f"{safe_slug}.html")
-    if not os.path.exists(file_path):
-        return HTMLResponse(content="<h1>404 Demo Site Not Found</h1>", status_code=404)
-    with open(file_path, "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
 
 # ==============================================================================
 # Configuration & Initialization
@@ -113,6 +101,19 @@ async def lifespan(app: FastAPI):
     watchdog.cancel()
 
 app = FastAPI(title="ARGUS Core Protocol Engine", version="2.9.0", lifespan=lifespan)
+
+# Create a demos directory
+DEMO_DIR = os.path.join(os.path.dirname(__file__), "generated_demos")
+os.makedirs(DEMO_DIR, exist_ok=True)
+
+@app.get("/preview/{slug}", response_class=HTMLResponse)
+def serve_client_demo(slug: str):
+    safe_slug = "".join(c for c in slug if c.isalnum() or c in ("-", "_")).lower()
+    file_path = os.path.join(DEMO_DIR, f"{safe_slug}.html")
+    if not os.path.exists(file_path):
+        return HTMLResponse(content="<h1>404 Demo Site Not Found</h1>", status_code=404)
+    with open(file_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 # ==============================================================================
 # CORS Configuration & Global Fallbacks
