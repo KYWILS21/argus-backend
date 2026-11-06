@@ -8,7 +8,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/drive.readonly"  # Added Drive scope
+    "https://www.googleapis.com/auth/drive.readonly"
 ]
 
 def main():
