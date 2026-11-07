@@ -156,123 +156,12 @@ async def cors_preflight_handler(rest_of_path: str):
 async def favicon():
     return Response(status_code=204)
 
-def google_scout_images_live(query: str, count: int = 4) -> List[str]:
-    """Scrapes live image result URLs directly from Google Images."""
-    clean_q = urllib.parse.quote(f"{query} high resolution")
-    url = f"https://www.google.com/search?q={clean_q}&tbm=isch&hl=en"
-    image_urls = []
-    
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-            
-        # Match real photo links embedded inside Google Image thumbnails and script payloads
-        matches = re.findall(r'https://[^"]+\.(?:jpg|jpeg|png|webp)', html)
-        for m in matches:
-            # Filter out UI assets, tracking pixels, and logos
-            if not any(bad in m.lower() for bad in ["gstatic", "google", "logo", "favicon", "icon", "1x1"]):
-                if m not in image_urls:
-                    image_urls.append(m)
-                    if len(image_urls) >= count:
-                        break
-    except Exception as e:
-        print(f"Google image scout error for '{query}': {e}")
-
-    # Fallback contextual photography if Google blocks image scraping
-    while len(image_urls) < count:
-        image_urls.append("https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80")
-        
-    return image_urls[:count]
-
-
-def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
-    """Autonomous decision engine: classifies business type, sets tone, and extracts real offerings."""
-    prompt = f"""
-    Analyze the business "{business_name}" located in "{location}" based on this Google search data:
-    {raw_intel[:1800]}
-
-    DECISION TASK:
-    1. Determine the EXACT business archetype. Choose ONE:
-       - "hospitality" (restaurants, cafes, bakeries, bars, pizzerias)
-       - "contractor_trades" (plumbers, auto repair, roofers, detailers, electricians, HVAC)
-       - "professional_medical" (dentists, law firms, clinics, gyms, accounting, barbershops/salons)
-       - "retail_goods" (clothing stores, boutiques, electronics, bookshops)
-    2. Define relevant action buttons (e.g. "Order Online" vs "Request Free Quote" vs "Book Consultation").
-    3. Extract 3 signature offerings (dishes for food; service packages for contractors; treatments for medical; product categories for retail).
-    4. Extract 4-6 catalog items with realistic pricing and details.
-
-    RETURN ONLY A STRICT JSON OBJECT:
-    {{
-      "archetype": "hospitality" | "contractor_trades" | "professional_medical" | "retail_goods",
-      "niche_label": "e.g., Auto Repair & Diagnostic Specialists",
-      "tagline": "Compelling 10-15 word summary of why customers choose this business",
-      "primary_cta": "e.g., Book Service Appointment",
-      "secondary_cta": "e.g., View Service Pricing",
-      "featured_heading": "e.g., Signature Offerings | Core Specialties | Popular Services",
-      "catalog_heading": "e.g., Full Menu | Rates & Pricing | Service Packages",
-      "image_search_terms": ["item 1", "item 2", "item 3"],
-      "featured_items": [
-        {{"name": "Real Item / Service 1", "price": "$XX.XX or 'Call for Quote'", "description": "Authentic description based on Google intel"}},
-        {{"name": "Real Item / Service 2", "price": "$XX.XX", "description": "Authentic description"}},
-        {{"name": "Real Item / Service 3", "price": "$XX.XX", "description": "Authentic description"}}
-      ],
-      "catalog_items": [
-        {{"name": "Item 4", "price": "$XX.XX", "description": "Concise detail"}},
-        {{"name": "Item 5", "price": "$XX.XX", "description": "Concise detail"}},
-        {{"name": "Item 6", "price": "$XX.XX", "description": "Concise detail"}},
-        {{"name": "Item 7", "price": "$XX.XX", "description": "Concise detail"}}
-      ]
-    }}
-    """
-    try:
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an autonomous B2B classification and architectural engine. Output strictly valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"}
-        )
-        return json.loads(resp.choices[0].message.content.strip())
-    except Exception as e:
-        print(f"Autonomous profile extraction error: {e}")
-        return {
-            "archetype": "contractor_trades",
-            "niche_label": "Local Specialists",
-            "tagline": f"Premier quality and dedicated professional service in {location}.",
-            "primary_cta": "Contact Us",
-            "secondary_cta": "View Offerings",
-            "featured_heading": "Core Offerings",
-            "catalog_heading": "Service Rates",
-            "image_search_terms": [business_name, "service", "storefront"],
-            "featured_items": [
-                {"name": "Comprehensive Standard Service", "price": "Competitive", "description": "Expert execution tailored to client specifications."},
-                {"name": "Custom Diagnostic & Evaluation", "price": "Top Rated", "description": "Thorough inspection with verified results."},
-                {"name": "Priority Master Package", "price": "Guaranteed", "description": "End-to-end service with priority turnaround."}
-            ],
-            "catalog_items": [
-                {"name": "Standard Consultation", "price": "$50.00", "description": "Initial assessment"},
-                {"name": "Full Service Package", "price": "$150.00", "description": "Complete execution"},
-                {"name": "Maintenance Check", "price": "$85.00", "description": "Preventative routine care"},
-                {"name": "Express Service", "price": "$120.00", "description": "Same-day priority"}
-            ]
-        }
-
 def google_scout_intel(business_name: str, location: str) -> str:
-    """Queries Google to extract real menus, offerings, pricing, and operating details."""
     queries = [
         f"{business_name} {location} services prices reviews hours",
         f"{business_name} {location} popular offerings about"
     ]
     raw_snippets = []
-    
     for q in queries:
         try:
             clean_q = urllib.parse.quote(q)
@@ -290,26 +179,20 @@ def google_scout_intel(business_name: str, location: str) -> str:
                     raw_snippets.append(clean)
         except Exception as e:
             print(f"Scout fetch error for query '{q}': {e}")
-
     return "\n".join(raw_snippets) if raw_snippets else f"Local establishment located in {location}."
 
 
 def google_scout_images_live(query: str, count: int = 4) -> List[str]:
-    """Scrapes live image result URLs directly from Google Images."""
     clean_q = urllib.parse.quote(f"{query} high resolution")
     url = f"https://www.google.com/search?q={clean_q}&tbm=isch&hl=en"
     image_urls = []
-    
     try:
         req = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            }
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
         )
         with urllib.request.urlopen(req, timeout=6) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-            
         matches = re.findall(r'https://[^"]+\.(?:jpg|jpeg|png|webp)', html)
         for m in matches:
             if not any(bad in m.lower() for bad in ["gstatic", "google", "logo", "favicon", "icon", "1x1"]):
@@ -322,46 +205,39 @@ def google_scout_images_live(query: str, count: int = 4) -> List[str]:
 
     while len(image_urls) < count:
         image_urls.append("https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80")
-        
     return image_urls[:count]
 
 
 def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
-    """Autonomous decision engine: classifies business type, sets tone, and extracts real offerings."""
     prompt = f"""
     Analyze the business "{business_name}" located in "{location}" based on this Google search data:
     {raw_intel[:1800]}
 
     DECISION TASK:
-    1. Determine the EXACT business archetype. Choose ONE:
-       - "hospitality" (restaurants, cafes, bakeries, bars, pizzerias)
-       - "contractor_trades" (plumbers, auto repair, roofers, detailers, electricians, HVAC)
-       - "professional_medical" (dentists, law firms, clinics, gyms, accounting, barbershops/salons)
-       - "retail_goods" (clothing stores, boutiques, electronics, bookshops)
-    2. Define relevant action buttons (e.g. "Order Online" vs "Request Free Quote" vs "Book Service Appointment").
-    3. Extract 3 signature offerings (dishes for food; service packages for contractors; treatments for medical; product categories for retail).
-    4. Extract 4-6 catalog items with realistic pricing and details.
+    1. Determine the EXACT business archetype: "hospitality", "contractor_trades", "professional_medical", or "retail_goods".
+    2. Define relevant action buttons (e.g., "Schedule Service", "Book Appointment", "Order Online").
+    3. Extract 3 signature offerings and 4 catalog items with realistic prices based on what they do.
 
     RETURN ONLY A STRICT JSON OBJECT:
     {{
-      "archetype": "hospitality" | "contractor_trades" | "professional_medical" | "retail_goods",
-      "niche_label": "e.g., Auto Repair & Tire Center",
-      "tagline": "Compelling 10-15 word summary of why customers choose this business",
-      "primary_cta": "e.g., Book Service Appointment",
-      "secondary_cta": "e.g., View Service Pricing",
-      "featured_heading": "e.g., Core Automotive Services",
-      "catalog_heading": "e.g., Standard Rates & Pricing",
-      "image_search_terms": ["tires", "brake repair", "engine maintenance"],
+      "archetype": "contractor_trades",
+      "niche_label": "Auto Repair & Tire Specialists",
+      "tagline": "Complete automotive care, tire installations, and inspections in {location}.",
+      "primary_cta": "Schedule Service",
+      "secondary_cta": "View Services",
+      "featured_heading": "Featured Automotive Services",
+      "catalog_heading": "Popular Maintenance & Repairs",
+      "image_search_terms": ["auto repair", "tires", "mechanic shop"],
       "featured_items": [
-        {{"name": "Real Item / Service 1", "price": "$XX.XX or 'Call for Quote'", "description": "Authentic description based on Google intel"}},
-        {{"name": "Real Item / Service 2", "price": "$XX.XX", "description": "Authentic description"}},
-        {{"name": "Real Item / Service 3", "price": "$XX.XX", "description": "Authentic description"}}
+        {{"name": "Tire Mount, Balance & Rotation", "price": "$89.00", "description": "Precision mounting and high-speed balancing for extended tread life."}},
+        {{"name": "Complete Brake Pad & Rotor Service", "price": "$189.00", "description": "Ceramic brake pads, rotor replacement, and full safety check."}},
+        {{"name": "Computerized Diagnostics", "price": "$95.00", "description": "OBD-II scans, sensor verification, and technician diagnosis."}}
       ],
       "catalog_items": [
-        {{"name": "Item 4", "price": "$XX.XX", "description": "Concise detail"}},
-        {{"name": "Item 5", "price": "$XX.XX", "description": "Concise detail"}},
-        {{"name": "Item 6", "price": "$XX.XX", "description": "Concise detail"}},
-        {{"name": "Item 7", "price": "$XX.XX", "description": "Concise detail"}}
+        {{"name": "Full Synthetic Oil Change", "price": "$69.99", "description": "Includes filter and 21-point safety check"}},
+        {{"name": "PA State Inspection & Emissions", "price": "$75.00", "description": "Official annual safety inspection and emissions testing"}},
+        {{"name": "Four-Wheel Alignment", "price": "$99.00", "description": "Laser-calibrated alignment for steering stability"}},
+        {{"name": "Battery Testing & Replacement", "price": "$145.00", "description": "Load test and heavy-duty battery installation"}}
       ]
     }}
     """
@@ -371,7 +247,7 @@ def extract_structured_business_profile(business_name: str, location: str, raw_i
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "You are an autonomous B2B classification and architectural engine. Output strictly valid JSON."},
+                {"role": "system", "content": "You are an autonomous B2B classification engine. Output strictly valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -391,17 +267,16 @@ def extract_structured_business_profile(business_name: str, location: str, raw_i
             "image_search_terms": ["auto repair", "tires", "mechanic shop"],
             "featured_items": [
                 {"name": "Tire Mount, Balance & Rotation", "price": "$89.00", "description": "Precision mounting and high-speed balancing for extended tread life."},
-                {"name": "Complete Brake Pad & Rotor Service", "price": "$189.00", "description": "Ceramic brake pads, rotor replacement, and full system safety inspection."},
-                {"name": "Computerized Engine Diagnostics", "price": "$95.00", "description": "OBD-II trouble code scans, sensor check, and technician diagnosis."}
+                {"name": "Complete Brake Pad & Rotor Service", "price": "$189.00", "description": "Ceramic brake pads, rotor replacement, and full safety check."},
+                {"name": "Computerized Diagnostics", "price": "$95.00", "description": "OBD-II scans, sensor verification, and technician diagnosis."}
             ],
             "catalog_items": [
-                {"name": "Full Synthetic Oil Change", "price": "$69.99", "description": "Includes filter replacement and 21-point safety check"},
+                {"name": "Full Synthetic Oil Change", "price": "$69.99", "description": "Includes filter and 21-point safety check"},
                 {"name": "PA State Inspection & Emissions", "price": "$75.00", "description": "Official annual safety inspection and emissions testing"},
-                {"name": "Four-Wheel Alignment", "price": "$99.00", "description": "Laser-calibrated alignment for steering stability and tire life"},
+                {"name": "Four-Wheel Alignment", "price": "$99.00", "description": "Laser-calibrated alignment for steering stability"},
                 {"name": "Battery Testing & Replacement", "price": "$145.00", "description": "Load test and heavy-duty battery installation"}
             ]
         }
-
 
 def generate_client_website_tool(
     business_name: str, 
