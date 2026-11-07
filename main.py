@@ -209,35 +209,59 @@ def google_scout_images_live(query: str, count: int = 4) -> List[str]:
 
 
 def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
+    """Autonomous Creative Engine: Decides aesthetic direction, styling tokens, architecture (1 vs 2 page), and offerings."""
     prompt = f"""
-    Analyze the business "{business_name}" located in "{location}" based on this Google search data:
+    Analyze the business "{business_name}" in "{location}" using this Google search data:
     {raw_intel[:1800]}
 
-    DECISION TASK:
-    1. Determine the EXACT business archetype: "hospitality", "contractor_trades", "professional_medical", or "retail_goods".
-    2. Define relevant action buttons (e.g., "Schedule Service", "Book Appointment", "Order Online").
-    3. Extract 3 signature offerings and 4 catalog items with realistic prices based on what they do.
+    CREATIVE ARCHITECTURAL & AESTHETIC DIRECTIVES:
+    1. Vibe & Aesthetic Decision:
+       - What is the brand aesthetic? (e.g., "Gritty, dependable urban garage", "Warm, rustic artisan warmth", "Sleek, high-tech clinic", "Bold, fast-paced street deli").
+       - Pick distinct Tailwind styling tokens tailored to this aesthetic:
+         * Primary Accent Color (e.g., 'amber-600', 'emerald-600', 'red-600', 'sky-500', 'indigo-600', 'stone-900')
+         * Secondary Surface Tone (e.g., 'zinc-900', 'stone-900', 'slate-950', 'neutral-100')
+         * Border Radius Theme (e.g., 'rounded-none' for brutalist/industrial, 'rounded-xl' for modern tech, 'rounded-3xl' for friendly/welcoming)
+         * Font Mood (e.g., 'font-sans tracking-tight', 'font-mono uppercase', 'font-serif')
+    
+    2. Architecture Decision (1-Page vs 2-Page):
+       - Choose "single_page" IF the business is fast-action (pizzeria, quick oil change, takeout food, standard tow service).
+       - Choose "two_page" IF the business has dense services, custom appointments, detailed menus, or requires deeper client trust (full auto repair, medical/dental, law, upscale dining, specialty contracting).
+       - If "two_page", give a clear title for Page 2 (e.g., "Full Diagnostic & Fleet Services", "Complete Dinner & Drink Menu", "Treatment Plans & Pricing").
 
-    RETURN ONLY A STRICT JSON OBJECT:
+    3. Offering Extraction:
+       - 3 Hero Showcase cards with prices and rich descriptions.
+       - 6 to 8 Catalog / secondary service or menu items with accurate pricing.
+
+    RETURN ONLY A STRICT JSON OBJECT matching this schema:
     {{
-      "archetype": "contractor_trades",
-      "niche_label": "Auto Repair & Tire Specialists",
-      "tagline": "Complete automotive care, tire installations, and inspections in {location}.",
-      "primary_cta": "Schedule Service",
-      "secondary_cta": "View Services",
-      "featured_heading": "Featured Automotive Services",
-      "catalog_heading": "Popular Maintenance & Repairs",
-      "image_search_terms": ["auto repair", "tires", "mechanic shop"],
+      "archetype": "hospitality" | "contractor_trades" | "professional_medical" | "retail_goods",
+      "vibe_summary": "Short 5-8 word description of chosen brand aesthetic",
+      "architecture": "single_page" | "two_page",
+      "page_two_title": "Title for second page/view (or null if single_page)",
+      "styling": {{
+        "accent_color": "e.g., amber-600",
+        "accent_hover": "e.g., amber-700",
+        "bg_surface": "e.g., neutral-900",
+        "card_radius": "e.g., rounded-2xl",
+        "font_class": "e.g., font-sans"
+      }},
+      "niche_label": "e.g., Automotive Diagnostic & Performance Hub",
+      "tagline": "Compelling, aesthetic 10-14 word value proposition",
+      "primary_cta": "Action button text",
+      "secondary_cta": "Secondary action button text",
+      "featured_heading": "Curated headline for main highlights",
+      "catalog_heading": "Headline for secondary items/menu",
+      "image_search_terms": ["item 1", "item 2", "item 3"],
       "featured_items": [
-        {{"name": "Tire Mount, Balance & Rotation", "price": "$89.00", "description": "Precision mounting and high-speed balancing for extended tread life."}},
-        {{"name": "Complete Brake Pad & Rotor Service", "price": "$189.00", "description": "Ceramic brake pads, rotor replacement, and full safety check."}},
-        {{"name": "Computerized Diagnostics", "price": "$95.00", "description": "OBD-II scans, sensor verification, and technician diagnosis."}}
+        {{"name": "Authentic Name 1", "price": "$XX.XX", "description": "Crisp authentic detail."}},
+        {{"name": "Authentic Name 2", "price": "$XX.XX", "description": "Crisp authentic detail."}},
+        {{"name": "Authentic Name 3", "price": "$XX.XX", "description": "Crisp authentic detail."}}
       ],
       "catalog_items": [
-        {{"name": "Full Synthetic Oil Change", "price": "$69.99", "description": "Includes filter and 21-point safety check"}},
-        {{"name": "PA State Inspection & Emissions", "price": "$75.00", "description": "Official annual safety inspection and emissions testing"}},
-        {{"name": "Four-Wheel Alignment", "price": "$99.00", "description": "Laser-calibrated alignment for steering stability"}},
-        {{"name": "Battery Testing & Replacement", "price": "$145.00", "description": "Load test and heavy-duty battery installation"}}
+        {{"name": "Service / Item 4", "price": "$XX.XX", "description": "Detail."}},
+        {{"name": "Service / Item 5", "price": "$XX.XX", "description": "Detail."}},
+        {{"name": "Service / Item 6", "price": "$XX.XX", "description": "Detail."}},
+        {{"name": "Service / Item 7", "price": "$XX.XX", "description": "Detail."}}
       ]
     }}
     """
@@ -247,10 +271,10 @@ def extract_structured_business_profile(business_name: str, location: str, raw_i
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "You are an autonomous B2B classification engine. Output strictly valid JSON."},
+                {"role": "system", "content": "You are an autonomous creative director and frontend architect. Output strictly valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,
+            temperature=0.3,
             response_format={"type": "json_object"}
         )
         return json.loads(resp.choices[0].message.content.strip())
@@ -258,26 +282,36 @@ def extract_structured_business_profile(business_name: str, location: str, raw_i
         print(f"Autonomous profile extraction error: {e}")
         return {
             "archetype": "contractor_trades",
-            "niche_label": "Auto Repair & Tire Specialists",
-            "tagline": f"Complete automotive care, tire installations, and inspections in {location}.",
-            "primary_cta": "Schedule Service",
-            "secondary_cta": "View Services",
-            "featured_heading": "Featured Automotive Services",
-            "catalog_heading": "Popular Maintenance & Repairs",
-            "image_search_terms": ["auto repair", "tires", "mechanic shop"],
+            "vibe_summary": "Rugged, high-contrast industrial precision",
+            "architecture": "two_page",
+            "page_two_title": "Full Service Directory & Inspection Rates",
+            "styling": {
+                "accent_color": "amber-500",
+                "accent_hover": "amber-600",
+                "bg_surface": "neutral-950",
+                "card_radius": "rounded-xl",
+                "font_class": "font-sans"
+            },
+            "niche_label": "Automotive Specialists",
+            "tagline": f"Precision mechanical care, diagnostics, and tire services in {location}.",
+            "primary_cta": "Book Service",
+            "secondary_cta": "Explore Rates",
+            "featured_heading": "Signature Automotive Services",
+            "catalog_heading": "Maintenance & Diagnostic Directory",
+            "image_search_terms": ["auto repair", "tires", "mechanic"],
             "featured_items": [
-                {"name": "Tire Mount, Balance & Rotation", "price": "$89.00", "description": "Precision mounting and high-speed balancing for extended tread life."},
-                {"name": "Complete Brake Pad & Rotor Service", "price": "$189.00", "description": "Ceramic brake pads, rotor replacement, and full safety check."},
-                {"name": "Computerized Diagnostics", "price": "$95.00", "description": "OBD-II scans, sensor verification, and technician diagnosis."}
+                {"name": "Tire Mount, Balance & Rotation", "price": "$89.00", "description": "Laser-balanced installation ensuring longevity and smooth highway operation."},
+                {"name": "Complete Ceramic Brake Service", "price": "$189.00", "description": "Precision rotor replacement, pad fitting, and hydraulic system flush."},
+                {"name": "Computerized Engine Diagnostics", "price": "$95.00", "description": "Deep OBD-II scanner integration and electrical sensor fault isolation."}
             ],
             "catalog_items": [
-                {"name": "Full Synthetic Oil Change", "price": "$69.99", "description": "Includes filter and 21-point safety check"},
-                {"name": "PA State Inspection & Emissions", "price": "$75.00", "description": "Official annual safety inspection and emissions testing"},
-                {"name": "Four-Wheel Alignment", "price": "$99.00", "description": "Laser-calibrated alignment for steering stability"},
-                {"name": "Battery Testing & Replacement", "price": "$145.00", "description": "Load test and heavy-duty battery installation"}
+                {"name": "Full Synthetic Oil & Filter Service", "price": "$69.99", "description": "Factory-spec oil paired with complete 25-point visual checklist."},
+                {"name": "PA State Safety & Emissions Inspection", "price": "$75.00", "description": "Certified testing and road-readiness compliance inspection."},
+                {"name": "Laser Four-Wheel Suspension Alignment", "price": "$99.00", "description": "Camber, caster, and toe adjustment for pinpoint handling."},
+                {"name": "Battery & Alternator Electrical Overhaul", "price": "$145.00", "description": "High-amperage testing and cold-crank reserve installation."}
             ]
         }
-
+    
 def generate_client_website_tool(
     business_name: str, 
     niche: str, 
@@ -289,26 +323,36 @@ def generate_client_website_tool(
     if not slug:
         slug = f"demo-{int(time.time())}"
 
-    # 1. AUTONOMOUS SCOUTING: Search Google for business intel
+    # 1. SCOUT LIVE INTEL FROM GOOGLE
     print(f"ARGUS Scouting Google for '{business_name}' in '{location}'...")
     raw_intel = google_scout_intel(business_name, location)
 
-    # 2. ARCHETYPE & INTEL EXTRACTION: ARGUS decides the structure
+    # 2. CREATIVE DECISION: Aesthetic styling & 1-page vs 2-page architecture
     profile = extract_structured_business_profile(business_name, location, raw_intel)
     
+    style = profile.get("styling", {})
+    accent = style.get("accent_color", "amber-500")
+    accent_hover = style.get("accent_hover", "amber-600")
+    bg_surface = style.get("bg_surface", "neutral-950")
+    radius = style.get("card_radius", "rounded-2xl")
+    font_class = style.get("font_class", "font-sans")
+
+    is_two_page = profile.get("architecture") == "two_page"
+    page_two_title = profile.get("page_two_title", "Detailed Offerings & Directory")
+    vibe = profile.get("vibe_summary", "Custom aesthetic")
+
     niche_label = profile.get("niche_label", niche)
     tagline = profile.get("tagline", "Quality service and dedicated customer care.")
     primary_cta = profile.get("primary_cta", "Contact Today")
-    secondary_cta = profile.get("secondary_cta", "View Details")
-    featured_heading = profile.get("featured_heading", "Featured Offerings")
-    catalog_heading = profile.get("catalog_heading", "Pricing & Services")
+    secondary_cta = profile.get("secondary_cta", "Explore Details")
+    featured_heading = profile.get("featured_heading", "Featured Highlights")
+    catalog_heading = profile.get("catalog_heading", "Complete Directory")
     featured_items = profile.get("featured_items", [])[:3]
     catalog_items = profile.get("catalog_items", [])[:6]
     search_terms = profile.get("image_search_terms", [business_name])
 
-    # 3. LIVE GOOGLE IMAGE HARVESTING
-    print(f"ARGUS Scouting Google Images for '{business_name}'...")
-    hero_photos = google_scout_images_live(f"{business_name} {location} storefront", count=1)
+    # 3. GOOGLE IMAGE HARVESTING
+    hero_photos = google_scout_images_live(f"{business_name} {location} storefront interior", count=1)
     hero_photo = hero_photos[0] if hero_photos else "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80"
     
     card_photos = []
@@ -316,46 +360,54 @@ def generate_client_website_tool(
         item_imgs = google_scout_images_live(f"{business_name} {term}", count=1)
         if item_imgs:
             card_photos.append(item_imgs[0])
-            
     while len(card_photos) < 3:
         card_photos.append("https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=800&q=80")
 
-    # 4. DYNAMIC CARD & CATALOG COMPILATION
+    # 4. COMPOSE FEATURED CARDS
     cards_html = ""
     for idx, item in enumerate(featured_items):
         img_url = card_photos[idx % len(card_photos)]
         name = item.get("name", "Offering")
         price = item.get("price", "Market")
-        desc = item.get("description", "Quality service provided to order.")
+        desc = item.get("description", "Crafted with precision.")
         cards_html += f"""
-        <div class="bg-white rounded-2xl shadow-sm border border-neutral-200 overflow-hidden flex flex-col justify-between hover:shadow-md transition">
-          <img src="{img_url}" class="w-full h-48 object-cover" alt="{name}" onerror="this.src='https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=800&q=80'">
+        <div class="bg-white {radius} shadow-sm border border-neutral-200 overflow-hidden flex flex-col justify-between hover:shadow-lg transition">
+          <img src="{img_url}" class="w-full h-52 object-cover" alt="{name}" onerror="this.src='https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=800&q=80'">
           <div class="p-6">
             <div class="flex justify-between items-baseline mb-2">
               <h3 class="text-xl font-bold text-neutral-900">{name}</h3>
-              <span class="text-amber-600 font-bold ml-2">{price}</span>
+              <span class="text-{accent} font-extrabold ml-2">{price}</span>
             </div>
             <p class="text-neutral-600 text-sm leading-relaxed">{desc}</p>
           </div>
         </div>
         """
 
+    # 5. COMPOSE CATALOG / SECONDARY DIRECTORY
     catalog_html = ""
     for item in catalog_items:
-        name = item.get("name", "Service / Product")
+        name = item.get("name", "Service / Dish")
         price = item.get("price", "Inquire")
-        desc = item.get("description", "Standard offering.")
+        desc = item.get("description", "Standard execution.")
         catalog_html += f"""
         <div class="border-b border-neutral-200 pb-4">
           <div class="flex justify-between font-bold text-neutral-900">
             <span>{name}</span>
-            <span class="text-amber-600">{price}</span>
+            <span class="text-{accent}">{price}</span>
           </div>
           <p class="text-sm text-neutral-600 mt-1">{desc}</p>
         </div>
         """
 
-    # 5. ASSEMBLE ADAPTIVE ARCHETYPE HTML
+    # 6. ARCHITECTURE SWITCH: Navigation & Dual-Page JavaScript Router
+    nav_links = """
+      <button onclick="switchTab('home')" id="tab-home" class="text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white">Overview</button>
+    """
+    if is_two_page:
+        nav_links += f"""
+      <button onclick="switchTab('directory')" id="tab-directory" class="text-neutral-400 hover:text-white font-semibold text-sm transition pb-1 border-b-2 border-transparent">{page_two_title}</button>
+        """
+
     full_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -364,69 +416,122 @@ def generate_client_website_tool(
   <title>{business_name} | {location}</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-neutral-50 text-neutral-800 font-sans antialiased">
-  <!-- Sticky Header -->
-  <header class="bg-neutral-900 text-white sticky top-0 z-50 shadow-md">
+<body class="bg-neutral-50 text-neutral-800 {font_class} antialiased selection:bg-{accent} selection:text-white">
+  
+  <!-- Navigation Header -->
+  <header class="bg-{bg_surface} text-white sticky top-0 z-50 shadow-md">
     <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
-      <span class="text-xl font-bold tracking-wider uppercase text-amber-500">{business_name}</span>
-      <a href="#contact" class="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition">{primary_cta}</a>
+      <div class="flex items-center space-x-6">
+        <span class="text-xl font-black tracking-wider uppercase text-{accent}">{business_name}</span>
+        <nav class="hidden md:flex space-x-4">
+          {nav_links}
+        </nav>
+      </div>
+      <a href="#contact" class="bg-{accent} hover:bg-{accent_hover} text-white font-bold px-4 py-2 {radius} text-sm transition shadow-sm">{primary_cta}</a>
     </div>
   </header>
 
-  <!-- Hero Section -->
-  <section class="relative bg-neutral-900 text-white py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url('{hero_photo}');">
-    <div class="max-w-3xl mx-auto space-y-6">
-      <span class="text-amber-400 uppercase tracking-widest text-sm font-bold">{niche_label} &bull; {location}</span>
-      <h1 class="text-4xl sm:text-6xl font-extrabold tracking-tight">{business_name}</h1>
-      <p class="text-lg text-neutral-200 max-w-2xl mx-auto">{tagline}</p>
-      <div class="pt-4 flex justify-center gap-4">
-        <a href="#offerings" class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg transition">{primary_cta}</a>
-        <a href="#catalog" class="bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 rounded-xl font-bold transition">{secondary_cta}</a>
+  <!-- PAGE 1: Overview & Hero -->
+  <main id="view-home" class="space-y-0">
+    <section class="relative bg-{bg_surface} text-white py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.74), rgba(0,0,0,0.74)), url('{hero_photo}');">
+      <div class="max-w-3xl mx-auto space-y-6">
+        <span class="inline-block bg-{accent}/20 border border-{accent}/30 text-{accent} uppercase tracking-widest text-xs font-black px-3 py-1.5 {radius}">{niche_label} &bull; {location}</span>
+        <h1 class="text-4xl sm:text-6xl font-black tracking-tight">{business_name}</h1>
+        <p class="text-lg text-neutral-200 max-w-2xl mx-auto leading-relaxed">{tagline}</p>
+        <div class="pt-4 flex justify-center gap-4">
+          <a href="#featured" class="bg-{accent} hover:bg-{accent_hover} text-white px-6 py-3 {radius} font-bold shadow-lg transition">{primary_cta}</a>
+          {"<button onclick=\"switchTab('directory')\" class=\"bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 " + radius + " font-bold transition\">" + secondary_cta + "</button>" if is_two_page else "<a href=\"#catalog\" class=\"bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 " + radius + " font-bold transition\">" + secondary_cta + "</a>"}
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Dynamic Featured Section -->
-  <section id="offerings" class="py-16 px-6 max-w-6xl mx-auto">
-    <div class="text-center mb-12">
-      <span class="text-amber-600 uppercase font-bold text-xs tracking-widest">Selected Standards</span>
-      <h2 class="text-3xl font-bold text-neutral-900 mt-1">{featured_heading}</h2>
-    </div>
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-      {cards_html}
-    </div>
-  </section>
-
-  <!-- Dynamic Catalog / Service Board -->
-  <section id="catalog" class="py-16 px-6 bg-neutral-100">
-    <div class="max-w-4xl mx-auto">
-      <div class="text-center mb-10">
-        <span class="text-amber-600 uppercase font-bold text-xs tracking-widest">Verified Pricing</span>
-        <h2 class="text-3xl font-bold text-neutral-900 mt-1">{catalog_heading}</h2>
+    <!-- Featured Showcase -->
+    <section id="featured" class="py-16 px-6 max-w-6xl mx-auto">
+      <div class="text-center mb-12">
+        <span class="text-{accent} uppercase font-bold text-xs tracking-widest">Hand-Selected Highlights</span>
+        <h2 class="text-3xl font-extrabold text-neutral-900 mt-1">{featured_heading}</h2>
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 rounded-2xl shadow-sm border border-neutral-200">
-        {catalog_html}
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+        {cards_html}
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Location & Contact Card -->
-  <section id="contact" class="bg-neutral-50 py-16 px-6">
-    <div class="max-w-xl mx-auto bg-white p-8 rounded-2xl shadow-sm border border-neutral-200 text-center space-y-4">
+    <!-- Single Page Catalog Integration (Shown on main page if single_page) -->
+    {"<!-- 1-Page Inline Catalog -->" if not is_two_page else "<!-- 2-Page Mode Active: Catalog rendered in secondary view -->"}
+    {f'''
+    <section id="catalog" class="py-16 px-6 bg-neutral-100 border-t border-neutral-200">
+      <div class="max-w-4xl mx-auto">
+        <div class="text-center mb-10">
+          <span class="text-{accent} uppercase font-bold text-xs tracking-widest">Comprehensive Breakdown</span>
+          <h2 class="text-3xl font-extrabold text-neutral-900 mt-1">{catalog_heading}</h2>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 {radius} shadow-sm border border-neutral-200">
+          {catalog_html}
+        </div>
+      </div>
+    </section>
+    ''' if not is_two_page else ''}
+  </main>
+
+  <!-- PAGE 2: Dedicated Secondary Directory View (If two_page chosen) -->
+  {f'''
+  <main id="view-directory" class="hidden py-16 px-6 max-w-4xl mx-auto min-h-[60vh]">
+    <div class="text-center mb-10">
+      <span class="text-{accent} uppercase font-bold text-xs tracking-widest">Extended Directory</span>
+      <h1 class="text-4xl font-black text-neutral-900 mt-1">{page_two_title}</h1>
+      <p class="text-neutral-600 mt-2">Comprehensive service listings, pricing schedules, and details for {business_name}.</p>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 {radius} shadow-sm border border-neutral-200">
+      {catalog_html}
+    </div>
+    <div class="text-center mt-8">
+      <button onclick="switchTab('home')" class="text-sm font-bold text-{accent} hover:underline">&larr; Return to Overview</button>
+    </div>
+  </main>
+  ''' if is_two_page else ''}
+
+  <!-- Location & Contact -->
+  <section id="contact" class="bg-neutral-100 py-16 px-6 border-t border-neutral-200">
+    <div class="max-w-xl mx-auto bg-white p-8 {radius} shadow-sm border border-neutral-200 text-center space-y-4">
       <h2 class="text-2xl font-bold text-neutral-900">{business_name}</h2>
       <p class="text-neutral-600">{location}</p>
       <div class="pt-2">
-        <span class="inline-block bg-neutral-100 text-neutral-700 text-xs px-3 py-1.5 rounded-full font-medium">Scouted & Categorized Autonomously by ARGUS</span>
+        <span class="inline-block bg-neutral-100 text-neutral-600 text-xs px-3 py-1.5 {radius} font-semibold">Artistically tailored & scouted autonomously by ARGUS</span>
       </div>
       <div class="pt-4">
-        <a href="#offerings" class="inline-block bg-amber-600 hover:bg-amber-700 text-white font-bold px-8 py-3 rounded-xl transition">{primary_cta}</a>
+        <a href="#featured" class="inline-block bg-{accent} hover:bg-{accent_hover} text-white font-bold px-8 py-3 {radius} transition shadow-sm">{primary_cta}</a>
       </div>
     </div>
   </section>
 
-  <footer class="bg-neutral-950 text-neutral-500 text-center py-8 text-sm">
-    <p>&copy; 2026 {business_name}. Autonomous prototype built via ARGUS.</p>
+  <footer class="bg-{bg_surface} text-neutral-500 text-center py-8 text-sm">
+    <p>&copy; 2026 {business_name}. Aesthetic: {vibe} &bull; Architecture: {'2-Page View' if is_two_page else '1-Page Lander'}.</p>
   </footer>
+
+  <script>
+    function switchTab(tab) {{
+      const homeView = document.getElementById('view-home');
+      const dirView = document.getElementById('view-directory');
+      const tabHome = document.getElementById('tab-home');
+      const tabDir = document.getElementById('tab-directory');
+
+      if (!dirView) return;
+
+      if (tab === 'home') {{
+        homeView.classList.remove('hidden');
+        dirView.classList.add('hidden');
+        tabHome.className = "text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white";
+        if (tabDir) tabDir.className = "text-neutral-400 hover:text-white font-semibold text-sm transition pb-1 border-b-2 border-transparent";
+        window.scrollTo({{ top: 0, behavior: 'smooth' }});
+      }} else {{
+        homeView.classList.add('hidden');
+        dirView.classList.remove('hidden');
+        tabHome.className = "text-neutral-400 hover:text-white font-semibold text-sm transition pb-1 border-b-2 border-transparent";
+        if (tabDir) tabDir.className = "text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white";
+        window.scrollTo({{ top: 0, behavior: 'smooth' }});
+      }}
+    }}
+  </script>
 </body>
 </html>"""
 
@@ -435,13 +540,14 @@ def generate_client_website_tool(
         f.write(full_html)
 
     preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
+    arch_label = "Interactive 2-Page Architecture" if is_two_page else "Focused 1-Page Landing Architecture"
     return (
         f"### Website Generated Autonomously for {business_name}\n"
-        f"- **Archetype Assigned:** `{profile.get('archetype', 'custom')}` ({niche_label})\n"
-        f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
-        f"- **Google Media:** Scraped live photos embedded with error failover\n"
-        f"- **File:** `generated_demos/{slug}.html`\n\n"
-        "ARGUS customized the layout and action buttons specifically for this business model."
+        f"- **Vibe & Aesthetic:** {vibe}\n"
+        f"- **Structure Decision:** `{arch_label}`\n"
+        f"- **Styling Tokens:** Accent: `{accent}`, Surface: `{bg_surface}`, Corner Radius: `{radius}`\n"
+        f"- **Live Preview Link:** [{preview_url}]({preview_url})\n\n"
+        "ARGUS autonomously designed the visual theme, typography, and page structure to match the business's identity."
     )
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
