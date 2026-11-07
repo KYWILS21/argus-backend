@@ -550,11 +550,11 @@ def generate_client_website_tool(
 </body>
 </html>"""
 
-    file_path = os.path.join(DEMO_DIR, f"{slug}.html")[cite: 1]
+    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(full_html)
 
-    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"[cite: 1]
+    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
     return (
         f"### Website Generated Autonomously for {clean_biz_name}\n"
         f"- **Vibe & Aesthetic:** {vibe}\n"
