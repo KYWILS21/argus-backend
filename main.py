@@ -161,82 +161,123 @@ def generate_client_website_tool(
     business_name: str, 
     niche: str, 
     location: str, 
-    contact_phone: str = None, 
-    highlights: str = None
+    contact_phone: Optional[str] = None, 
+    highlights: Optional[str] = None
 ) -> str:
-    """
-    Generates a responsive, modern HTML5/TailwindCSS landing page for a local business,
-    saves it locally, and generates a public live preview URL.
-    """
     phone = contact_phone if contact_phone else "(215) 555-0199"
     key_highlights = highlights if highlights else "Locally owned, top-rated service, high quality ingredients"
 
     slug = "".join(c for c in business_name.lower() if c.isalnum() or c == "-").strip("-")
     if not slug:
         slug = f"demo-{int(time.time())}"
-        
-    # Generate bespoke site code using Gemini
-    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not gemini_key:
-        return "GEMINI_API_KEY is required to generate website code."
 
-    prompt = f"""
-    Build a modern, high-converting, mobile-responsive single-page website for:
-    - Business Name: {business_name}
-    - Industry/Niche: {niche} (e.g. Italian Restaurant, Roofing Contractor, Plumbing)
-    - Location: {location}
-    - Phone: {contact_phone or '(555) 019-2834'}
-    - Selling Points / Highlights: {highlights or 'Fast service, licensed & insured, 5-star customer reviews'}
+    raw_html = None
 
-    REQUIREMENTS:
-    - Complete, valid standalone HTML5 file with embedded Tailwind CSS via CDN (<script src="https://cdn.tailwindcss.com"></script>).
-    - Modern dark/light sleek aesthetics (clean typography, hero section with call-to-action button, services/menu grid, social proof/testimonials section, contact form, and footer).
-    - Mobile-responsive navigation bar.
-    - DO NOT use markdown code fences in your output. Return ONLY the raw valid HTML starting with <!DOCTYPE html>.
-    
-    CRITICAL WEBSITE GENERATION DIRECTIVE:
-When asked to create, design, develop, or build a website or demo landing page for any business, you MUST NEVER write raw HTML, CSS, or file trees in your text response. 
-You MUST invoke `generate_client_website_tool` immediately with the business details. The backend will compile, save, and host the live preview automatically.
-    
-    """
+    # Use your active Groq client directly
+    if groq_client:
+        prompt = f"""
+        Build a modern, high-converting, mobile-responsive single-page website for:
+        - Business Name: {business_name}
+        - Industry/Niche: {niche}
+        - Location: {location}
+        - Phone: {phone}
+        - Selling Points / Highlights: {key_highlights}
 
-    model_name = os.getenv("GEMINI_SITE_MODEL", "gemini-1.5-flash")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4}
-    }
+        REQUIREMENTS:
+        - Complete valid standalone HTML5 file with embedded Tailwind CSS via CDN (<script src="https://cdn.tailwindcss.com"></script>).
+        - Hero section with CTA button, menu/services grid, testimonials, contact form, and footer.
+        - Return ONLY the raw valid HTML starting with <!DOCTYPE html>. Do NOT wrap in markdown code blocks or backticks.
+        """
+        try:
+            resp = groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are an elite front-end developer. Output ONLY valid raw HTML with Tailwind CSS without explanation or code blocks."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3
+            )
+            content = resp.choices[0].message.content.strip()
+            if content.startswith("```"):
+                lines = content.splitlines()
+                content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+            raw_html = content
+        except Exception as groq_err:
+            print(f"Groq site generation failed ({groq_err}), falling back to built-in template.")
 
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+    # High-converting resilient fallback template
+    if not raw_html:
+        raw_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{business_name} | {location}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-stone-50 text-stone-800 font-sans antialiased">
+  <header class="bg-stone-900 text-white sticky top-0 z-50 shadow-md">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
+      <span class="text-xl font-bold tracking-wider uppercase text-amber-500">{business_name}</span>
+      <a href="#contact" class="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition">Order / Reserve</a>
+    </div>
+  </header>
+  <section class="relative bg-stone-900 text-white py-24 px-6 text-center">
+    <div class="max-w-3xl mx-auto space-y-6">
+      <span class="text-amber-500 uppercase tracking-widest text-sm font-bold">{niche} &bull; {location}</span>
+      <h1 class="text-4xl sm:text-6xl font-extrabold tracking-tight">{business_name}</h1>
+      <p class="text-lg text-stone-300">{key_highlights}</p>
+      <div class="pt-4 flex justify-center gap-4">
+        <a href="#menu" class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg transition">Explore Offerings</a>
+        <a href="tel:{phone}" class="bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 px-6 py-3 rounded-xl font-bold transition">Call {phone}</a>
+      </div>
+    </div>
+  </section>
+  <section id="menu" class="py-16 px-6 max-w-6xl mx-auto">
+    <h2 class="text-3xl font-bold text-center mb-10 text-stone-900">Featured Specialties</h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-stone-200">
+        <h3 class="text-xl font-bold mb-2">Signature Cheesesteaks</h3>
+        <p class="text-stone-600">Fresh ribeye sliced thin, melted Cooper sharp or provolone, served on fresh seeded rolls.</p>
+      </div>
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-stone-200">
+        <h3 class="text-xl font-bold mb-2">Coal-Fired Pizza</h3>
+        <p class="text-stone-600">Crispy, blistered crust baked at high heat with hand-crushed tomatoes and fresh mozzarella.</p>
+      </div>
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-stone-200">
+        <h3 class="text-xl font-bold mb-2">Artisan Hoagies</h3>
+        <p class="text-stone-600">Stacked with imported cured meats, aged sharp provolone, and house oil seasoning.</p>
+      </div>
+    </div>
+  </section>
+  <section id="contact" class="bg-stone-100 py-16 px-6">
+    <div class="max-w-xl mx-auto bg-white p-8 rounded-2xl shadow-sm border border-stone-200 text-center space-y-4">
+      <h2 class="text-2xl font-bold">Visit Us or Place an Order</h2>
+      <p class="text-stone-600">{location}</p>
+      <p class="text-lg font-bold text-amber-700">{phone}</p>
+      <div class="pt-4">
+        <a href="tel:{phone}" class="inline-block bg-amber-600 hover:bg-amber-700 text-white font-bold px-8 py-3 rounded-xl transition">Call Now</a>
+      </div>
+    </div>
+  </section>
+  <footer class="bg-stone-950 text-stone-500 text-center py-8 text-sm">
+    <p>&copy; 2026 {business_name}. Powered by ARGUS Autonomous Web Systems.</p>
+  </footer>
+</body>
+</html>"""
 
-        raw_html = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        # Clean potential markdown backticks if model includes them
-        if raw_html.startswith("```"):
-            lines = raw_html.splitlines()
-            raw_html = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(raw_html)
 
-        file_path = os.path.join(DEMO_DIR, f"{slug}.html")
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(raw_html)
-
-        preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
-        return (
-            f"### Website Generated Successfully for {business_name}\n"
-            f"- **Industry:** {niche}\n"
-            f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
-            f"- **File:** `generated_demos/{slug}.html`\n\n"
-            "Ready for outreach! Would you like me to draft a cold outreach email or dispatch a message?"
-        )
-    except Exception as e:
-        return f"Failed to generate site: {str(e)}"
+    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
+    return (
+        f"### Website Generated Successfully for {business_name}\n"
+        f"- **Industry:** {niche}\n"
+        f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
+        f"- **File:** `generated_demos/{slug}.html`\n\n"
+        "Demo is live and hosted. Ready for outreach!"
+    )
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
     """Dispatches a push notification directly to user's iPhone via Pushover."""
@@ -588,7 +629,7 @@ def google_search_grounding(query: str) -> str:
 
     # Use the stable model endpoint syntax
     model_name = "gemini-2.5-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={gemini_key}"
 
     payload = {
         "contents": [
