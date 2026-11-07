@@ -40,7 +40,7 @@ except ImportError:
 # ==============================================================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip().strip('"').strip("'")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/llama-3.3-70b-versatile").strip().strip('"').strip("'")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token").strip()
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
@@ -192,7 +192,13 @@ def generate_client_website_tool(
     - Modern dark/light sleek aesthetics (clean typography, hero section with call-to-action button, services/menu grid, social proof/testimonials section, contact form, and footer).
     - Mobile-responsive navigation bar.
     - DO NOT use markdown code fences in your output. Return ONLY the raw valid HTML starting with <!DOCTYPE html>.
+    
+    CRITICAL WEBSITE GENERATION DIRECTIVE:
+When asked to create, design, develop, or build a website or demo landing page for any business, you MUST NEVER write raw HTML, CSS, or file trees in your text response. 
+You MUST invoke `generate_client_website_tool` immediately with the business details. The backend will compile, save, and host the live preview automatically.
+    
     """
+
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
     payload = {
@@ -1841,6 +1847,12 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     if any(clean_lower.startswith(prefix) for prefix in ["text ", "tell ", "msg ", "message "]):
         force_tool_choice = {"type": "function", "function": {"name": "dispatch_contact_message"}}
 
+    # ADD THIS: Force website generator tool on web design directives
+    web_keywords = ["website", "landing page", "demo site", "web page"]
+    action_keywords = ["generate", "create", "build", "make", "deploy"]
+    if any(act in clean_lower for act in action_keywords) and any(web in clean_lower for web in web_keywords):
+        force_tool_choice = {"type": "function", "function": {"name": "generate_client_website_tool"}}
+
     # Define timestamps and memory facts BEFORE building system_prompt
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     facts = list_facts()
@@ -1874,6 +1886,10 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
 
     messages.append({"role": "user", "content": user_input})
     save_message(session_id, "user", user_input)
+
+# Guarantee system prompt at index 0 and no more than the last 4 recent exchanges
+    if len(messages) > 6:
+        messages = [messages[0]] + messages[-5:]
 
     reply_text = ""
     max_turns = 4
