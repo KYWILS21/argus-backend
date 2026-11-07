@@ -319,87 +319,107 @@ def generate_client_website_tool(
     contact_phone: Optional[str] = None, 
     highlights: Optional[str] = None
 ) -> str:
-    slug = "".join(c for c in business_name.lower() if c.isalnum() or c == "-").strip("-")
+    # Clean business name to ensure clean URLs
+    clean_biz_name = re.split(r'\s+(?:and\s+just|and\s+make|with|featuring)\b', business_name, flags=re.IGNORECASE)[0].strip()
+    slug = "".join(c for c in clean_biz_name.lower() if c.isalnum() or c == "-").strip("-")
     if not slug:
         slug = f"demo-{int(time.time())}"
 
     # 1. SCOUT LIVE INTEL FROM GOOGLE
-    print(f"ARGUS Scouting Google for '{business_name}' in '{location}'...")
-    raw_intel = google_scout_intel(business_name, location)
+    print(f"ARGUS Scouting Google for '{clean_biz_name}' in '{location}'...")
+    raw_intel = google_scout_intel(clean_biz_name, location)
 
     # 2. CREATIVE DECISION: Aesthetic styling & 1-page vs 2-page architecture
-    profile = extract_structured_business_profile(business_name, location, raw_intel)
+    profile = extract_structured_business_profile(clean_biz_name, location, raw_intel)
     
-    style = profile.get("styling", {})
-    accent = style.get("accent_color", "amber-500")
-    accent_hover = style.get("accent_hover", "amber-600")
-    bg_surface = style.get("bg_surface", "neutral-950")
-    radius = style.get("card_radius", "rounded-2xl")
-    font_class = style.get("font_class", "font-sans")
+    # Map colors to explicit HEX values so Tailwind CDN never drops dynamic classes
+    color_map = {
+        "amber-600": ("#d97706", "#b45309"),
+        "amber-500": ("#f59e0b", "#d97706"),
+        "red-600": ("#dc2626", "#b91c1c"),
+        "emerald-600": ("#059669", "#047857"),
+        "sky-600": ("#0284c7", "#0369a1"),
+        "indigo-600": ("#4f46e5", "#4338ca"),
+        "stone-900": ("#1c1917", "#0c0a09")
+    }
+    
+    raw_accent = profile.get("styling", {}).get("accent_color", "amber-600")
+    accent_hex, accent_hover_hex = color_map.get(raw_accent, ("#d97706", "#b45309"))
+    bg_surface = profile.get("styling", {}).get("bg_surface", "neutral-950")
+    radius = profile.get("styling", {}).get("card_radius", "rounded-2xl")
+    font_class = profile.get("styling", {}).get("font_class", "font-sans")
 
     is_two_page = profile.get("architecture") == "two_page"
-    page_two_title = profile.get("page_two_title", "Detailed Offerings & Directory")
+    page_two_title = profile.get("page_two_title", "Detailed Directory & Pricing")
     vibe = profile.get("vibe_summary", "Custom aesthetic")
 
     niche_label = profile.get("niche_label", niche)
     tagline = profile.get("tagline", "Quality service and dedicated customer care.")
-    primary_cta = profile.get("primary_cta", "Contact Today")
-    secondary_cta = profile.get("secondary_cta", "Explore Details")
-    featured_heading = profile.get("featured_heading", "Featured Highlights")
+    primary_cta = profile.get("primary_cta", "Order / Contact")
+    secondary_cta = profile.get("secondary_cta", "Explore Offerings")
+    featured_heading = profile.get("featured_heading", "Signature Offerings")
     catalog_heading = profile.get("catalog_heading", "Complete Directory")
     featured_items = profile.get("featured_items", [])[:3]
     catalog_items = profile.get("catalog_items", [])[:6]
-    search_terms = profile.get("image_search_terms", [business_name])
 
-    # 3. GOOGLE IMAGE HARVESTING
-    hero_photos = google_scout_images_live(f"{business_name} {location} storefront interior", count=1)
-    hero_photo = hero_photos[0] if hero_photos else "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80"
+    # Archetype-aware photography fallbacks (no corporate office buildings for pizzerias)
+    is_food = any(w in clean_biz_name.lower() or w in niche_label.lower() for w in ["pizza", "steak", "hoagie", "bakery", "restaurant", "grill", "cafe", "taco"])
     
+    default_hero = "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=80" if is_food else "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1600&q=80"
+    default_cards = [
+        "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=800&q=80" if is_food else "https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=800&q=80",
+        "https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&w=800&q=80" if is_food else "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=800&q=80",
+        "https://images.unsplash.com/photo-1509722747041-616f39b57569?auto=format&fit=crop&w=800&q=80" if is_food else "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&w=800&q=80"
+    ]
+
+    hero_photos = google_scout_images_live(f"{clean_biz_name} {location} storefront", count=1)
+    hero_photo = hero_photos[0] if hero_photos else default_hero
+
     card_photos = []
+    search_terms = profile.get("image_search_terms", [clean_biz_name])
     for term in search_terms[:3]:
-        item_imgs = google_scout_images_live(f"{business_name} {term}", count=1)
+        item_imgs = google_scout_images_live(f"{clean_biz_name} {term}", count=1)
         if item_imgs:
             card_photos.append(item_imgs[0])
     while len(card_photos) < 3:
-        card_photos.append("https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=800&q=80")
+        card_photos.append(default_cards[len(card_photos)])
 
-    # 4. COMPOSE FEATURED CARDS
+    # Featured Cards
     cards_html = ""
     for idx, item in enumerate(featured_items):
         img_url = card_photos[idx % len(card_photos)]
         name = item.get("name", "Offering")
         price = item.get("price", "Market")
-        desc = item.get("description", "Crafted with precision.")
+        desc = item.get("description", "Prepared fresh to order.")
         cards_html += f"""
         <div class="bg-white {radius} shadow-sm border border-neutral-200 overflow-hidden flex flex-col justify-between hover:shadow-lg transition">
-          <img src="{img_url}" class="w-full h-52 object-cover" alt="{name}" onerror="this.src='https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=800&q=80'">
+          <img src="{img_url}" class="w-full h-52 object-cover" alt="{name}" onerror="this.src='{default_cards[idx % len(default_cards)]}'">
           <div class="p-6">
             <div class="flex justify-between items-baseline mb-2">
               <h3 class="text-xl font-bold text-neutral-900">{name}</h3>
-              <span class="text-{accent} font-extrabold ml-2">{price}</span>
+              <span class="font-extrabold ml-2" style="color: {accent_hex};">{price}</span>
             </div>
             <p class="text-neutral-600 text-sm leading-relaxed">{desc}</p>
           </div>
         </div>
         """
 
-    # 5. COMPOSE CATALOG / SECONDARY DIRECTORY
+    # Catalog Items
     catalog_html = ""
     for item in catalog_items:
-        name = item.get("name", "Service / Dish")
+        name = item.get("name", "Service / Selection")
         price = item.get("price", "Inquire")
-        desc = item.get("description", "Standard execution.")
+        desc = item.get("description", "Standard house preparation.")
         catalog_html += f"""
         <div class="border-b border-neutral-200 pb-4">
           <div class="flex justify-between font-bold text-neutral-900">
             <span>{name}</span>
-            <span class="text-{accent}">{price}</span>
+            <span style="color: {accent_hex};">{price}</span>
           </div>
           <p class="text-sm text-neutral-600 mt-1">{desc}</p>
         </div>
         """
 
-    # 6. ARCHITECTURE SWITCH: Navigation & Dual-Page JavaScript Router
     nav_links = """
       <button onclick="switchTab('home')" id="tab-home" class="text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white">Overview</button>
     """
@@ -413,42 +433,44 @@ def generate_client_website_tool(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{business_name} | {location}</title>
+  <title>{clean_biz_name} | {location}</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {{
+      --brand-accent: {accent_hex};
+      --brand-accent-hover: {accent_hover_hex};
+    }}
+  </style>
 </head>
-<body class="bg-neutral-50 text-neutral-800 {font_class} antialiased selection:bg-{accent} selection:text-white">
-  
-  <!-- Navigation Header -->
+<body class="bg-neutral-50 text-neutral-800 {font_class} antialiased">
   <header class="bg-{bg_surface} text-white sticky top-0 z-50 shadow-md">
     <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
       <div class="flex items-center space-x-6">
-        <span class="text-xl font-black tracking-wider uppercase text-{accent}">{business_name}</span>
+        <span class="text-xl font-black tracking-wider uppercase" style="color: {accent_hex};">{clean_biz_name}</span>
         <nav class="hidden md:flex space-x-4">
           {nav_links}
         </nav>
       </div>
-      <a href="#contact" class="bg-{accent} hover:bg-{accent_hover} text-white font-bold px-4 py-2 {radius} text-sm transition shadow-sm">{primary_cta}</a>
+      <a href="#contact" class="text-white font-bold px-4 py-2 {radius} text-sm transition shadow-sm" style="background-color: {accent_hex};">{primary_cta}</a>
     </div>
   </header>
 
-  <!-- PAGE 1: Overview & Hero -->
   <main id="view-home" class="space-y-0">
     <section class="relative bg-{bg_surface} text-white py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.74), rgba(0,0,0,0.74)), url('{hero_photo}');">
       <div class="max-w-3xl mx-auto space-y-6">
-        <span class="inline-block bg-{accent}/20 border border-{accent}/30 text-{accent} uppercase tracking-widest text-xs font-black px-3 py-1.5 {radius}">{niche_label} &bull; {location}</span>
-        <h1 class="text-4xl sm:text-6xl font-black tracking-tight">{business_name}</h1>
+        <span class="inline-block bg-white/10 border border-white/20 uppercase tracking-widest text-xs font-black px-3 py-1.5 {radius}" style="color: {accent_hex};">{niche_label} &bull; {location}</span>
+        <h1 class="text-4xl sm:text-6xl font-black tracking-tight">{clean_biz_name}</h1>
         <p class="text-lg text-neutral-200 max-w-2xl mx-auto leading-relaxed">{tagline}</p>
         <div class="pt-4 flex justify-center gap-4">
-          <a href="#featured" class="bg-{accent} hover:bg-{accent_hover} text-white px-6 py-3 {radius} font-bold shadow-lg transition">{primary_cta}</a>
+          <a href="#featured" class="text-white px-6 py-3 {radius} font-bold shadow-lg transition" style="background-color: {accent_hex};">{primary_cta}</a>
           {"<button onclick=\"switchTab('directory')\" class=\"bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 " + radius + " font-bold transition\">" + secondary_cta + "</button>" if is_two_page else "<a href=\"#catalog\" class=\"bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 " + radius + " font-bold transition\">" + secondary_cta + "</a>"}
         </div>
       </div>
     </section>
 
-    <!-- Featured Showcase -->
     <section id="featured" class="py-16 px-6 max-w-6xl mx-auto">
       <div class="text-center mb-12">
-        <span class="text-{accent} uppercase font-bold text-xs tracking-widest">Hand-Selected Highlights</span>
+        <span class="uppercase font-bold text-xs tracking-widest" style="color: {accent_hex};">Selected Highlights</span>
         <h2 class="text-3xl font-extrabold text-neutral-900 mt-1">{featured_heading}</h2>
       </div>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
@@ -456,13 +478,11 @@ def generate_client_website_tool(
       </div>
     </section>
 
-    <!-- Single Page Catalog Integration (Shown on main page if single_page) -->
-    {"<!-- 1-Page Inline Catalog -->" if not is_two_page else "<!-- 2-Page Mode Active: Catalog rendered in secondary view -->"}
     {f'''
     <section id="catalog" class="py-16 px-6 bg-neutral-100 border-t border-neutral-200">
       <div class="max-w-4xl mx-auto">
         <div class="text-center mb-10">
-          <span class="text-{accent} uppercase font-bold text-xs tracking-widest">Comprehensive Breakdown</span>
+          <span class="uppercase font-bold text-xs tracking-widest" style="color: {accent_hex};">Full Menu & Pricing</span>
           <h2 class="text-3xl font-extrabold text-neutral-900 mt-1">{catalog_heading}</h2>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 {radius} shadow-sm border border-neutral-200">
@@ -473,39 +493,34 @@ def generate_client_website_tool(
     ''' if not is_two_page else ''}
   </main>
 
-  <!-- PAGE 2: Dedicated Secondary Directory View (If two_page chosen) -->
   {f'''
   <main id="view-directory" class="hidden py-16 px-6 max-w-4xl mx-auto min-h-[60vh]">
     <div class="text-center mb-10">
-      <span class="text-{accent} uppercase font-bold text-xs tracking-widest">Extended Directory</span>
+      <span class="uppercase font-bold text-xs tracking-widest" style="color: {accent_hex};">Complete Menu</span>
       <h1 class="text-4xl font-black text-neutral-900 mt-1">{page_two_title}</h1>
-      <p class="text-neutral-600 mt-2">Comprehensive service listings, pricing schedules, and details for {business_name}.</p>
+      <p class="text-neutral-600 mt-2">Authentic dishes, handcrafted specials, and pricing for {clean_biz_name}.</p>
     </div>
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 {radius} shadow-sm border border-neutral-200">
       {catalog_html}
     </div>
     <div class="text-center mt-8">
-      <button onclick="switchTab('home')" class="text-sm font-bold text-{accent} hover:underline">&larr; Return to Overview</button>
+      <button onclick="switchTab('home')" class="text-sm font-bold hover:underline" style="color: {accent_hex};">&larr; Return to Overview</button>
     </div>
   </main>
   ''' if is_two_page else ''}
 
-  <!-- Location & Contact -->
   <section id="contact" class="bg-neutral-100 py-16 px-6 border-t border-neutral-200">
     <div class="max-w-xl mx-auto bg-white p-8 {radius} shadow-sm border border-neutral-200 text-center space-y-4">
-      <h2 class="text-2xl font-bold text-neutral-900">{business_name}</h2>
+      <h2 class="text-2xl font-bold text-neutral-900">{clean_biz_name}</h2>
       <p class="text-neutral-600">{location}</p>
-      <div class="pt-2">
-        <span class="inline-block bg-neutral-100 text-neutral-600 text-xs px-3 py-1.5 {radius} font-semibold">Artistically tailored & scouted autonomously by ARGUS</span>
-      </div>
       <div class="pt-4">
-        <a href="#featured" class="inline-block bg-{accent} hover:bg-{accent_hover} text-white font-bold px-8 py-3 {radius} transition shadow-sm">{primary_cta}</a>
+        <a href="#featured" class="inline-block text-white font-bold px-8 py-3 {radius} transition shadow-sm" style="background-color: {accent_hex};">{primary_cta}</a>
       </div>
     </div>
   </section>
 
   <footer class="bg-{bg_surface} text-neutral-500 text-center py-8 text-sm">
-    <p>&copy; 2026 {business_name}. Aesthetic: {vibe} &bull; Architecture: {'2-Page View' if is_two_page else '1-Page Lander'}.</p>
+    <p>&copy; 2026 {clean_biz_name}. Aesthetic: {vibe} &bull; Architecture: {'2-Page View' if is_two_page else '1-Page Lander'}.</p>
   </footer>
 
   <script>
@@ -535,19 +550,16 @@ def generate_client_website_tool(
 </body>
 </html>"""
 
-    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
+    file_path = os.path.join(DEMO_DIR, f"{slug}.html")[cite: 1]
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(full_html)
 
-    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
-    arch_label = "Interactive 2-Page Architecture" if is_two_page else "Focused 1-Page Landing Architecture"
+    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"[cite: 1]
     return (
-        f"### Website Generated Autonomously for {business_name}\n"
+        f"### Website Generated Autonomously for {clean_biz_name}\n"
         f"- **Vibe & Aesthetic:** {vibe}\n"
-        f"- **Structure Decision:** `{arch_label}`\n"
-        f"- **Styling Tokens:** Accent: `{accent}`, Surface: `{bg_surface}`, Corner Radius: `{radius}`\n"
-        f"- **Live Preview Link:** [{preview_url}]({preview_url})\n\n"
-        "ARGUS autonomously designed the visual theme, typography, and page structure to match the business's identity."
+        f"- **Palette Token:** Accent `{raw_accent}` applied via inline CSS variables\n"
+        f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
     )
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
