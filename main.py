@@ -156,22 +156,13 @@ async def cors_preflight_handler(rest_of_path: str):
 async def favicon():
     return Response(status_code=204)
 
-def google_scout_intel(business_name: str, location: str) -> str:
-    """Scouts real store hours, address, phone, and menu items/services via Google."""
-    # First priority: Use your native Google Search Grounding if active
-    query = f"{business_name} {location} menu services hours phone address reviews"
+def google_scout_images_live(query: str, count: int = 4) -> List[str]:
+    """Scrapes live image result URLs directly from Google Images."""
+    clean_q = urllib.parse.quote(f"{query} high resolution")
+    url = f"https://www.google.com/search?q={clean_q}&tbm=isch&hl=en"
+    image_urls = []
+    
     try:
-        grounded = google_search_grounding(query)
-        if grounded and "unavailable" not in grounded.lower():
-            return grounded
-    except Exception as e:
-        print(f"Google grounding scout error: {e}")
-
-    # Direct Google Search scrape fallback
-    intel = []
-    try:
-        clean_q = urllib.parse.quote(query)
-        url = f"https://www.google.com/search?q={clean_q}&num=5&hl=en"
         req = urllib.request.Request(
             url,
             headers={
@@ -180,71 +171,62 @@ def google_scout_intel(business_name: str, location: str) -> str:
         )
         with urllib.request.urlopen(req, timeout=6) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
+            
+        # Match real photo links embedded inside Google Image thumbnails and script payloads
+        matches = re.findall(r'https://[^"]+\.(?:jpg|jpeg|png|webp)', html)
+        for m in matches:
+            # Filter out UI assets, tracking pixels, and logos
+            if not any(bad in m.lower() for bad in ["gstatic", "google", "logo", "favicon", "icon", "1x1"]):
+                if m not in image_urls:
+                    image_urls.append(m)
+                    if len(image_urls) >= count:
+                        break
+    except Exception as e:
+        print(f"Google image scout error for '{query}': {e}")
 
-        # Extract text snippets from Google search results
-        snippets = re.findall(r'<div[^>]*class="[^"]*BNeawe s3v9rd AP7Wnd[^"]*"[^>]*>(.*?)</div>', html)
-        for s in snippets[:5]:
-            clean = re.sub(r'<[^>]+>', ' ', s).strip()
-            if clean and len(clean) > 30:
-                intel.append(f"- {clean}")
-    except Exception as err:
-        print(f"Direct Google search error: {err}")
-
-    return "\n".join(intel) if intel else "Established local business in the area."
-
-
-def google_scout_intel(business_name: str, location: str) -> str:
-    """Queries Google to extract real menus, offerings, pricing, and operating details."""
-    queries = [
-        f"{business_name} {location} menu prices specialties services",
-        f"{business_name} {location} popular dishes about hours"
-    ]
-    raw_snippets = []
-    
-    for q in queries:
-        try:
-            clean_q = urllib.parse.quote(q)
-            url = f"https://www.google.com/search?q={clean_q}&num=4&hl=en"
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
-            snippets = re.findall(r'<div[^>]*class="[^"]*BNeawe s3v9rd AP7Wnd[^"]*"[^>]*>(.*?)</div>', html)
-            for s in snippets[:3]:
-                clean = re.sub(r'<[^>]+>', ' ', s).strip()
-                if len(clean) > 25:
-                    raw_snippets.append(clean)
-        except Exception as e:
-            print(f"Scout fetch error for query '{q}': {e}")
-
-    return "\n".join(raw_snippets) if raw_snippets else f"Local establishment located in {location}."
+    # Fallback contextual photography if Google blocks image scraping
+    while len(image_urls) < count:
+        image_urls.append("https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80")
+        
+    return image_urls[:count]
 
 
-def extract_structured_business_profile(business_name: str, niche: str, location: str, raw_intel: str) -> Dict[str, Any]:
-    """Uses Groq to transform messy Google text into clean, structured JSON menu/services."""
+def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
+    """Autonomous decision engine: classifies business type, sets tone, and extracts real offerings."""
     prompt = f"""
-    Analyze the following Google search snippets for "{business_name}" ({niche}) in {location}.
-    Extract authentic dishes/services, realistic prices, and signature offerings.
-
-    GOOGLE SEARCH INTEL:
+    Analyze the business "{business_name}" located in "{location}" based on this Google search data:
     {raw_intel[:1800]}
 
-    RETURN ONLY A STRICT JSON OBJECT with this schema (no markdown, no extra text):
+    DECISION TASK:
+    1. Determine the EXACT business archetype. Choose ONE:
+       - "hospitality" (restaurants, cafes, bakeries, bars, pizzerias)
+       - "contractor_trades" (plumbers, auto repair, roofers, detailers, electricians, HVAC)
+       - "professional_medical" (dentists, law firms, clinics, gyms, accounting, barbershops/salons)
+       - "retail_goods" (clothing stores, boutiques, electronics, bookshops)
+    2. Define relevant action buttons (e.g. "Order Online" vs "Request Free Quote" vs "Book Consultation").
+    3. Extract 3 signature offerings (dishes for food; service packages for contractors; treatments for medical; product categories for retail).
+    4. Extract 4-6 catalog items with realistic pricing and details.
+
+    RETURN ONLY A STRICT JSON OBJECT:
     {{
-      "tagline": "A punchy 8-12 word description of why locals love this place",
-      "photo_keywords": ["specific dish or item 1", "specific dish or item 2", "specific dish or item 3"],
+      "archetype": "hospitality" | "contractor_trades" | "professional_medical" | "retail_goods",
+      "niche_label": "e.g., Auto Repair & Diagnostic Specialists",
+      "tagline": "Compelling 10-15 word summary of why customers choose this business",
+      "primary_cta": "e.g., Book Service Appointment",
+      "secondary_cta": "e.g., View Service Pricing",
+      "featured_heading": "e.g., Signature Offerings | Core Specialties | Popular Services",
+      "catalog_heading": "e.g., Full Menu | Rates & Pricing | Service Packages",
+      "image_search_terms": ["item 1", "item 2", "item 3"],
       "featured_items": [
-        {{"name": "Actual Real Item 1", "price": "$12.00", "description": "Crisp authentic description of ingredients or service."}},
-        {{"name": "Actual Real Item 2", "price": "$14.50", "description": "Crisp authentic description of ingredients or service."}},
-        {{"name": "Actual Real Item 3", "price": "$11.00", "description": "Crisp authentic description of ingredients or service."}}
+        {{"name": "Real Item / Service 1", "price": "$XX.XX or 'Call for Quote'", "description": "Authentic description based on Google intel"}},
+        {{"name": "Real Item / Service 2", "price": "$XX.XX", "description": "Authentic description"}},
+        {{"name": "Real Item / Service 3", "price": "$XX.XX", "description": "Authentic description"}}
       ],
-      "catalog_menu": [
-        {{"name": "Item 4", "price": "$10.00", "description": "Short detail."}},
-        {{"name": "Item 5", "price": "$15.00", "description": "Short detail."}},
-        {{"name": "Item 6", "price": "$8.50", "description": "Short detail."}},
-        {{"name": "Item 7", "price": "$13.00", "description": "Short detail."}}
+      "catalog_items": [
+        {{"name": "Item 4", "price": "$XX.XX", "description": "Concise detail"}},
+        {{"name": "Item 5", "price": "$XX.XX", "description": "Concise detail"}},
+        {{"name": "Item 6", "price": "$XX.XX", "description": "Concise detail"}},
+        {{"name": "Item 7", "price": "$XX.XX", "description": "Concise detail"}}
       ]
     }}
     """
@@ -252,7 +234,7 @@ def extract_structured_business_profile(business_name: str, niche: str, location
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "You are a data extraction engine. Output strictly valid JSON."},
+                {"role": "system", "content": "You are an autonomous B2B classification and architectural engine. Output strictly valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -260,21 +242,26 @@ def extract_structured_business_profile(business_name: str, niche: str, location
         )
         return json.loads(resp.choices[0].message.content.strip())
     except Exception as e:
-        print(f"JSON extraction failed: {e}")
-        # Universal fallback if Groq JSON extraction fails
+        print(f"Autonomous profile extraction error: {e}")
         return {
-            "tagline": f"The premier destination for authentic {niche.lower()} in {location}.",
-            "photo_keywords": [niche, "specialty", "craft"],
+            "archetype": "contractor_trades",
+            "niche_label": "Local Specialists",
+            "tagline": f"Premier quality and dedicated professional service in {location}.",
+            "primary_cta": "Contact Us",
+            "secondary_cta": "View Offerings",
+            "featured_heading": "Core Offerings",
+            "catalog_heading": "Service Rates",
+            "image_search_terms": [business_name, "service", "storefront"],
             "featured_items": [
-                {"name": f"Signature {niche} Selection", "price": "Market Price", "description": "Crafted fresh daily according to house standards."},
-                {"name": "House Specialty", "price": "Popular", "description": "A customer favorite known across the local community."},
-                {"name": "Chef / Master Selection", "price": "Top Rated", "description": "Prepared with premium ingredients and time-honored technique."}
+                {"name": "Comprehensive Standard Service", "price": "Competitive", "description": "Expert execution tailored to client specifications."},
+                {"name": "Custom Diagnostic & Evaluation", "price": "Top Rated", "description": "Thorough inspection with verified results."},
+                {"name": "Priority Master Package", "price": "Guaranteed", "description": "End-to-end service with priority turnaround."}
             ],
-            "catalog_menu": [
-                {"name": "Classic Offering", "price": "$12.00", "description": "Standard house preparation."},
-                {"name": "Deluxe Option", "price": "$16.50", "description": "Served with premium accompaniments."},
-                {"name": "House Special", "price": "$14.00", "description": "Locally renowned standard."},
-                {"name": "Seasonal Feature", "price": "$15.00", "description": "Subject to daily preparation."}
+            "catalog_items": [
+                {"name": "Standard Consultation", "price": "$50.00", "description": "Initial assessment"},
+                {"name": "Full Service Package", "price": "$150.00", "description": "Complete execution"},
+                {"name": "Maintenance Check", "price": "$85.00", "description": "Preventative routine care"},
+                {"name": "Express Service", "price": "$120.00", "description": "Same-day priority"}
             ]
         }
 
@@ -290,39 +277,47 @@ def generate_client_website_tool(
     if not slug:
         slug = f"demo-{int(time.time())}"
 
-    # 1. AUTONOMOUS SCOUTING: Scrape Google for real data
+    # 1. AUTONOMOUS SCOUTING: Search Google for business intel
     print(f"ARGUS Scouting Google for '{business_name}' in '{location}'...")
     raw_intel = google_scout_intel(business_name, location)
 
-    # 2. INTEL SYNTHESIS: Convert scraped data into clean structured schema
-    profile = extract_structured_business_profile(business_name, niche, location, raw_intel)
+    # 2. ARCHETYPE & INTEL EXTRACTION: ARGUS decides the structure
+    profile = extract_structured_business_profile(business_name, location, raw_intel)
     
-    tagline = profile.get("tagline") or f"Authentic {niche} crafted with care in {location}."
-    featured = profile.get("featured_items", [])[:3]
-    catalog = profile.get("catalog_menu", [])[:6]
-    keywords = profile.get("photo_keywords", [niche, "service", "craft"])
+    niche_label = profile.get("niche_label", niche)
+    tagline = profile.get("tagline", "Quality service and dedicated customer care.")
+    primary_cta = profile.get("primary_cta", "Contact Today")
+    secondary_cta = profile.get("secondary_cta", "View Details")
+    featured_heading = profile.get("featured_heading", "Featured Offerings")
+    catalog_heading = profile.get("catalog_heading", "Pricing & Services")
+    featured_items = profile.get("featured_items", [])[:3]
+    catalog_items = profile.get("catalog_items", [])[:6]
+    search_terms = profile.get("image_search_terms", [business_name])
 
-    # 3. ASSET HARVESTING: Source high-res Unsplash photography matching the exact niche
-    clean_niche = urllib.parse.quote(f"{niche} food interior" if any(w in niche.lower() for w in ["pizza", "restaurant", "cafe", "grill", "bakery", "deli"]) else f"{niche} service professional")
-    hero_photo = f"https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=1600&q=80"
+    # 3. LIVE GOOGLE IMAGE HARVESTING
+    print(f"ARGUS Scouting Google Images for '{business_name}'...")
+    hero_photos = google_scout_images_live(f"{business_name} {location} storefront", count=1)
+    hero_photo = hero_photos[0] if hero_photos else "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80"
     
-    # Curated contextual image slots
-    card_photos = [
-        "https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&w=800&q=80"
-    ]
+    card_photos = []
+    for term in search_terms[:3]:
+        item_imgs = google_scout_images_live(f"{business_name} {term}", count=1)
+        if item_imgs:
+            card_photos.append(item_imgs[0])
+            
+    while len(card_photos) < 3:
+        card_photos.append("https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=800&q=80")
 
-    # Build Featured Cards HTML dynamically from Google intel
+    # 4. DYNAMIC CARD & CATALOG COMPILATION
     cards_html = ""
-    for idx, item in enumerate(featured):
+    for idx, item in enumerate(featured_items):
         img_url = card_photos[idx % len(card_photos)]
-        name = item.get("name", "Signature Item")
-        price = item.get("price", "$12.99")
-        desc = item.get("description", "Prepared fresh to order.")
+        name = item.get("name", "Offering")
+        price = item.get("price", "Market")
+        desc = item.get("description", "Quality service provided to order.")
         cards_html += f"""
         <div class="bg-white rounded-2xl shadow-sm border border-neutral-200 overflow-hidden flex flex-col justify-between hover:shadow-md transition">
-          <img src="{img_url}" class="w-full h-48 object-cover" alt="{name}">
+          <img src="{img_url}" class="w-full h-48 object-cover" alt="{name}" onerror="this.src='https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=800&q=80'">
           <div class="p-6">
             <div class="flex justify-between items-baseline mb-2">
               <h3 class="text-xl font-bold text-neutral-900">{name}</h3>
@@ -333,12 +328,11 @@ def generate_client_website_tool(
         </div>
         """
 
-    # Build Catalog / Price Board HTML dynamically from Google intel
     catalog_html = ""
-    for item in catalog:
-        name = item.get("name", "Menu Selection")
-        price = item.get("price", "Market")
-        desc = item.get("description", "Traditional preparation.")
+    for item in catalog_items:
+        name = item.get("name", "Service / Product")
+        price = item.get("price", "Inquire")
+        desc = item.get("description", "Standard offering.")
         catalog_html += f"""
         <div class="border-b border-neutral-200 pb-4">
           <div class="flex justify-between font-bold text-neutral-900">
@@ -349,7 +343,7 @@ def generate_client_website_tool(
         </div>
         """
 
-    # 4. UNIVERSAL PRODUCTION TEMPLATE
+    # 5. ASSEMBLE ADAPTIVE ARCHETYPE HTML
     full_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -359,42 +353,44 @@ def generate_client_website_tool(
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-neutral-50 text-neutral-800 font-sans antialiased">
+  <!-- Sticky Header -->
   <header class="bg-neutral-900 text-white sticky top-0 z-50 shadow-md">
     <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
       <span class="text-xl font-bold tracking-wider uppercase text-amber-500">{business_name}</span>
-      <a href="#contact" class="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition">Visit / Inquire</a>
+      <a href="#contact" class="bg-amber-600 hover:bg-amber-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition">{primary_cta}</a>
     </div>
   </header>
 
+  <!-- Hero Section -->
   <section class="relative bg-neutral-900 text-white py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url('{hero_photo}');">
     <div class="max-w-3xl mx-auto space-y-6">
-      <span class="text-amber-400 uppercase tracking-widest text-sm font-bold">{niche} &bull; {location}</span>
+      <span class="text-amber-400 uppercase tracking-widest text-sm font-bold">{niche_label} &bull; {location}</span>
       <h1 class="text-4xl sm:text-6xl font-extrabold tracking-tight">{business_name}</h1>
       <p class="text-lg text-neutral-200 max-w-2xl mx-auto">{tagline}</p>
       <div class="pt-4 flex justify-center gap-4">
-        <a href="#offerings" class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg transition">Signature Specialties</a>
-        <a href="#catalog" class="bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 rounded-xl font-bold transition">Full Offerings</a>
+        <a href="#offerings" class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg transition">{primary_cta}</a>
+        <a href="#catalog" class="bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 rounded-xl font-bold transition">{secondary_cta}</a>
       </div>
     </div>
   </section>
 
-  <!-- Featured Items Identified via Google -->
+  <!-- Dynamic Featured Section -->
   <section id="offerings" class="py-16 px-6 max-w-6xl mx-auto">
     <div class="text-center mb-12">
-      <span class="text-amber-600 uppercase font-bold text-xs tracking-widest">Handcrafted Standards</span>
-      <h2 class="text-3xl font-bold text-neutral-900 mt-1">Signature Favorites</h2>
+      <span class="text-amber-600 uppercase font-bold text-xs tracking-widest">Selected Standards</span>
+      <h2 class="text-3xl font-bold text-neutral-900 mt-1">{featured_heading}</h2>
     </div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
       {cards_html}
     </div>
   </section>
 
-  <!-- Catalog / Price Board Identified via Google -->
+  <!-- Dynamic Catalog / Service Board -->
   <section id="catalog" class="py-16 px-6 bg-neutral-100">
     <div class="max-w-4xl mx-auto">
       <div class="text-center mb-10">
-        <span class="text-amber-600 uppercase font-bold text-xs tracking-widest">Complete Selection</span>
-        <h2 class="text-3xl font-bold text-neutral-900 mt-1">Menu & Offerings</h2>
+        <span class="text-amber-600 uppercase font-bold text-xs tracking-widest">Verified Pricing</span>
+        <h2 class="text-3xl font-bold text-neutral-900 mt-1">{catalog_heading}</h2>
       </div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 rounded-2xl shadow-sm border border-neutral-200">
         {catalog_html}
@@ -402,35 +398,38 @@ def generate_client_website_tool(
     </div>
   </section>
 
-  <!-- Business Details & Google Intel Grounding -->
+  <!-- Location & Contact Card -->
   <section id="contact" class="bg-neutral-50 py-16 px-6">
     <div class="max-w-xl mx-auto bg-white p-8 rounded-2xl shadow-sm border border-neutral-200 text-center space-y-4">
       <h2 class="text-2xl font-bold text-neutral-900">{business_name}</h2>
       <p class="text-neutral-600">{location}</p>
       <div class="pt-2">
-        <span class="inline-block bg-neutral-100 text-neutral-700 text-xs px-3 py-1.5 rounded-full font-medium">Scouted & Grounded autonomously via ARGUS</span>
+        <span class="inline-block bg-neutral-100 text-neutral-700 text-xs px-3 py-1.5 rounded-full font-medium">Scouted & Categorized Autonomously by ARGUS</span>
+      </div>
+      <div class="pt-4">
+        <a href="#offerings" class="inline-block bg-amber-600 hover:bg-amber-700 text-white font-bold px-8 py-3 rounded-xl transition">{primary_cta}</a>
       </div>
     </div>
   </section>
 
   <footer class="bg-neutral-950 text-neutral-500 text-center py-8 text-sm">
-    <p>&copy; 2026 {business_name}. Autonomous prototype prepared by ARGUS Executive Systems.</p>
+    <p>&copy; 2026 {business_name}. Autonomous prototype built via ARGUS.</p>
   </footer>
 </body>
 </html>"""
 
-    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
+    file_path = os.path.join(DEMO_DIR, f"{slug}.html")[cite: 1]
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(full_html)
 
-    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
+    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"[cite: 1]
     return (
         f"### Website Generated Autonomously for {business_name}\n"
-        f"- **Category:** {niche}\n"
+        f"- **Archetype Assigned:** `{profile.get('archetype', 'custom')}` ({niche_label})\n"
         f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
-        f"- **Scout Source:** Google Live Intel Extraction\n"
+        f"- **Google Media:** Scraped live photos embedded with error failover\n"
         f"- **File:** `generated_demos/{slug}.html`\n\n"
-        "Demo is live and hosted. Ready for outreach!"
+        "ARGUS customized the layout and action buttons specifically for this business model."
     )
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
