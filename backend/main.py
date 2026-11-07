@@ -40,7 +40,8 @@ except ImportError:
 # ==============================================================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/llama-3.3-70b-versatile").strip().strip('"').strip("'")
+raw_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip().strip('"').strip("'")
+GROQ_MODEL = raw_model.replace("openai/", "")
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token").strip()
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
@@ -360,6 +361,10 @@ def get_history(session_id: str, limit: int = 6) -> List[Dict[str, str]]:
         valid_history = []
         for r, c in reversed(rows):
             clean_content = (c or "").strip()
+            # ADD THIS GUARD: Truncate past huge code/table dumps to protect TPM
+            if len(clean_content) > 1200:
+                clean_content = clean_content[:1200] + "... [prior details truncated]"
+                
             if clean_content and not clean_content.startswith("{") and not clean_content.startswith("["):
                 valid_history.append({"role": r, "content": clean_content})
         return valid_history
@@ -1851,7 +1856,24 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     web_keywords = ["website", "landing page", "demo site", "web page"]
     action_keywords = ["generate", "create", "build", "make", "deploy"]
     if any(act in clean_lower for act in action_keywords) and any(web in clean_lower for web in web_keywords):
-        force_tool_choice = {"type": "function", "function": {"name": "generate_client_website_tool"}}
+        match = re.search(r'(?:for|of)\s+([A-Za-z0-9\s\'\-]+?)(?:\s+in\s+([A-Za-z0-9\s,\.\-]+?))?(?:\s+(?:featuring|specializing in|offering|with)\s+(.+))?$', user_input, re.IGNORECASE)
+        
+        biz_name = match.group(1).strip() if match else "Local Business"
+        loc = match.group(2).strip() if (match and match.group(2)) else "Philadelphia, PA"
+        highlights = match.group(3).strip() if (match and match.group(3)) else "Locally owned, 5-star customer reviews"
+        niche = "Italian Restaurant & Pizzeria" if any(w in clean_lower for w in ["pizza", "pizzeria", "hoagie", "food", "pasta"]) else "Contractor & Home Services"
+        
+        tool_result = generate_client_website_tool(
+            business_name=biz_name,
+            niche=niche,
+            location=loc,
+            contact_phone=None,
+            highlights=highlights
+        )
+        save_message(session_id, "user", user_input)
+        save_message(session_id, "assistant", tool_result)
+        return ChatResponse(reply=tool_result, session_id=session_id)
+
 
     # Define timestamps and memory facts BEFORE building system_prompt
     current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -1899,6 +1921,9 @@ async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)
     contact_body = None
 
     try:
+        # Guarantee system prompt at index 0 and no more than the last 4 recent exchanges
+        if len(messages) > 5:
+            messages = [messages[0]] + messages[-4:]
         while turn_count < max_turns:
             turn_count += 1
             response = None
