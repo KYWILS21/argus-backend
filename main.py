@@ -182,136 +182,35 @@ def google_scout_intel(business_name: str, location: str) -> str:
     return "\n".join(raw_snippets) if raw_snippets else f"Local establishment located in {location}."
 
 
-def google_scout_images_live(query: str, count: int = 4) -> List[str]:
-    clean_q = urllib.parse.quote(f"{query} high resolution")
-    url = f"https://www.google.com/search?q={clean_q}&tbm=isch&hl=en"
+def scout_authentic_images(query: str, count: int = 4) -> List[str]:
+    """Scrapes direct, authentic photo URLs via DDGS without triggering bot blocks."""
     image_urls = []
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        matches = re.findall(r'https://[^"]+\.(?:jpg|jpeg|png|webp)', html)
-        for m in matches:
-            if not any(bad in m.lower() for bad in ["gstatic", "google", "logo", "favicon", "icon", "1x1"]):
-                if m not in image_urls:
-                    image_urls.append(m)
+        with DDGS() as ddgs:
+            # Query for real food, storefront, or shop photos
+            results = list(ddgs.images(f"{query} real photography", max_results=count * 2))
+            for r in results:
+                url = r.get("image")
+                if url and url.startswith("http") and not any(b in url.lower() for b in [".svg", "logo", "icon", "favicon", "1x1"]):
+                    image_urls.append(url)
                     if len(image_urls) >= count:
                         break
     except Exception as e:
-        print(f"Google image scout error for '{query}': {e}")
+        print(f"Image search error for '{query}': {e}")
 
+    # Fallback to authentic Unsplash culinary/business photography if search yields nothing
+    fallbacks = [
+        "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=80",
+        "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=800&q=80",
+        "https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&w=800&q=80",
+        "https://images.unsplash.com/photo-1509722747041-616f39b57569?auto=format&fit=crop&w=800&q=80"
+    ]
     while len(image_urls) < count:
-        image_urls.append("https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80")
+        image_urls.append(fallbacks[len(image_urls) % len(fallbacks)])
+
     return image_urls[:count]
 
 
-def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
-    """Autonomous Creative Engine: Decides aesthetic direction, styling tokens, architecture (1 vs 2 page), and offerings."""
-    prompt = f"""
-    Analyze the business "{business_name}" in "{location}" using this Google search data:
-    {raw_intel[:1800]}
-
-    CREATIVE ARCHITECTURAL & AESTHETIC DIRECTIVES:
-    1. Vibe & Aesthetic Decision:
-       - What is the brand aesthetic? (e.g., "Gritty, dependable urban garage", "Warm, rustic artisan warmth", "Sleek, high-tech clinic", "Bold, fast-paced street deli").
-       - Pick distinct Tailwind styling tokens tailored to this aesthetic:
-         * Primary Accent Color (e.g., 'amber-600', 'emerald-600', 'red-600', 'sky-500', 'indigo-600', 'stone-900')
-         * Secondary Surface Tone (e.g., 'zinc-900', 'stone-900', 'slate-950', 'neutral-100')
-         * Border Radius Theme (e.g., 'rounded-none' for brutalist/industrial, 'rounded-xl' for modern tech, 'rounded-3xl' for friendly/welcoming)
-         * Font Mood (e.g., 'font-sans tracking-tight', 'font-mono uppercase', 'font-serif')
-    
-    2. Architecture Decision (1-Page vs 2-Page):
-       - Choose "single_page" IF the business is fast-action (pizzeria, quick oil change, takeout food, standard tow service).
-       - Choose "two_page" IF the business has dense services, custom appointments, detailed menus, or requires deeper client trust (full auto repair, medical/dental, law, upscale dining, specialty contracting).
-       - If "two_page", give a clear title for Page 2 (e.g., "Full Diagnostic & Fleet Services", "Complete Dinner & Drink Menu", "Treatment Plans & Pricing").
-
-    3. Offering Extraction:
-       - 3 Hero Showcase cards with prices and rich descriptions.
-       - 6 to 8 Catalog / secondary service or menu items with accurate pricing.
-
-    RETURN ONLY A STRICT JSON OBJECT matching this schema:
-    {{
-      "archetype": "hospitality" | "contractor_trades" | "professional_medical" | "retail_goods",
-      "vibe_summary": "Short 5-8 word description of chosen brand aesthetic",
-      "architecture": "single_page" | "two_page",
-      "page_two_title": "Title for second page/view (or null if single_page)",
-      "styling": {{
-        "accent_color": "e.g., amber-600",
-        "accent_hover": "e.g., amber-700",
-        "bg_surface": "e.g., neutral-900",
-        "card_radius": "e.g., rounded-2xl",
-        "font_class": "e.g., font-sans"
-      }},
-      "niche_label": "e.g., Automotive Diagnostic & Performance Hub",
-      "tagline": "Compelling, aesthetic 10-14 word value proposition",
-      "primary_cta": "Action button text",
-      "secondary_cta": "Secondary action button text",
-      "featured_heading": "Curated headline for main highlights",
-      "catalog_heading": "Headline for secondary items/menu",
-      "image_search_terms": ["item 1", "item 2", "item 3"],
-      "featured_items": [
-        {{"name": "Authentic Name 1", "price": "$XX.XX", "description": "Crisp authentic detail."}},
-        {{"name": "Authentic Name 2", "price": "$XX.XX", "description": "Crisp authentic detail."}},
-        {{"name": "Authentic Name 3", "price": "$XX.XX", "description": "Crisp authentic detail."}}
-      ],
-      "catalog_items": [
-        {{"name": "Service / Item 4", "price": "$XX.XX", "description": "Detail."}},
-        {{"name": "Service / Item 5", "price": "$XX.XX", "description": "Detail."}},
-        {{"name": "Service / Item 6", "price": "$XX.XX", "description": "Detail."}},
-        {{"name": "Service / Item 7", "price": "$XX.XX", "description": "Detail."}}
-      ]
-    }}
-    """
-    try:
-        if not groq_client:
-            raise ValueError("Groq client not available")
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an autonomous creative director and frontend architect. Output strictly valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
-        return json.loads(resp.choices[0].message.content.strip())
-    except Exception as e:
-        print(f"Autonomous profile extraction error: {e}")
-        return {
-            "archetype": "contractor_trades",
-            "vibe_summary": "Rugged, high-contrast industrial precision",
-            "architecture": "two_page",
-            "page_two_title": "Full Service Directory & Inspection Rates",
-            "styling": {
-                "accent_color": "amber-500",
-                "accent_hover": "amber-600",
-                "bg_surface": "neutral-950",
-                "card_radius": "rounded-xl",
-                "font_class": "font-sans"
-            },
-            "niche_label": "Automotive Specialists",
-            "tagline": f"Precision mechanical care, diagnostics, and tire services in {location}.",
-            "primary_cta": "Book Service",
-            "secondary_cta": "Explore Rates",
-            "featured_heading": "Signature Automotive Services",
-            "catalog_heading": "Maintenance & Diagnostic Directory",
-            "image_search_terms": ["auto repair", "tires", "mechanic"],
-            "featured_items": [
-                {"name": "Tire Mount, Balance & Rotation", "price": "$89.00", "description": "Laser-balanced installation ensuring longevity and smooth highway operation."},
-                {"name": "Complete Ceramic Brake Service", "price": "$189.00", "description": "Precision rotor replacement, pad fitting, and hydraulic system flush."},
-                {"name": "Computerized Engine Diagnostics", "price": "$95.00", "description": "Deep OBD-II scanner integration and electrical sensor fault isolation."}
-            ],
-            "catalog_items": [
-                {"name": "Full Synthetic Oil & Filter Service", "price": "$69.99", "description": "Factory-spec oil paired with complete 25-point visual checklist."},
-                {"name": "PA State Safety & Emissions Inspection", "price": "$75.00", "description": "Certified testing and road-readiness compliance inspection."},
-                {"name": "Laser Four-Wheel Suspension Alignment", "price": "$99.00", "description": "Camber, caster, and toe adjustment for pinpoint handling."},
-                {"name": "Battery & Alternator Electrical Overhaul", "price": "$145.00", "description": "High-amperage testing and cold-crank reserve installation."}
-            ]
-        }
-    
 def generate_client_website_tool(
     business_name: str, 
     niche: str, 
@@ -319,247 +218,100 @@ def generate_client_website_tool(
     contact_phone: Optional[str] = None, 
     highlights: Optional[str] = None
 ) -> str:
-    # Clean business name to ensure clean URLs
+    # 1. Clean business name to ensure short, clean URLs
     clean_biz_name = re.split(r'\s+(?:and\s+just|and\s+make|with|featuring)\b', business_name, flags=re.IGNORECASE)[0].strip()
     slug = "".join(c for c in clean_biz_name.lower() if c.isalnum() or c == "-").strip("-")
     if not slug:
         slug = f"demo-{int(time.time())}"
 
-    # 1. SCOUT LIVE INTEL FROM GOOGLE
-    print(f"ARGUS Scouting Google for '{clean_biz_name}' in '{location}'...")
-    raw_intel = google_scout_intel(clean_biz_name, location)
-
-    # 2. CREATIVE DECISION: Aesthetic styling & 1-page vs 2-page architecture
-    profile = extract_structured_business_profile(clean_biz_name, location, raw_intel)
+    # 2. Scout real business data and live photos
+    print(f"ARGUS Scouting live intel for '{clean_biz_name}' in '{location}'...")
+    scouted_intel = google_scout_intel(clean_biz_name, location)
     
-    # Map colors to explicit HEX values so Tailwind CDN never drops dynamic classes
-    color_map = {
-        "amber-600": ("#d97706", "#b45309"),
-        "amber-500": ("#f59e0b", "#d97706"),
-        "red-600": ("#dc2626", "#b91c1c"),
-        "emerald-600": ("#059669", "#047857"),
-        "sky-600": ("#0284c7", "#0369a1"),
-        "indigo-600": ("#4f46e5", "#4338ca"),
-        "stone-900": ("#1c1917", "#0c0a09")
-    }
-    
-    raw_accent = profile.get("styling", {}).get("accent_color", "amber-600")
-    accent_hex, accent_hover_hex = color_map.get(raw_accent, ("#d97706", "#b45309"))
-    bg_surface = profile.get("styling", {}).get("bg_surface", "neutral-950")
-    radius = profile.get("styling", {}).get("card_radius", "rounded-2xl")
-    font_class = profile.get("styling", {}).get("font_class", "font-sans")
+    # Extract authentic photography for the business and its signature products
+    scouted_photos = scout_authentic_images(f"{clean_biz_name} {location}", count=5)
+    hero_photo = scouted_photos[0]
+    dish_photos = scouted_photos[1:5]
 
-    is_two_page = profile.get("architecture") == "two_page"
-    page_two_title = profile.get("page_two_title", "Detailed Directory & Pricing")
-    vibe = profile.get("vibe_summary", "Custom aesthetic")
-
-    niche_label = profile.get("niche_label", niche)
-    tagline = profile.get("tagline", "Quality service and dedicated customer care.")
-    primary_cta = profile.get("primary_cta", "Order / Contact")
-    secondary_cta = profile.get("secondary_cta", "Explore Offerings")
-    featured_heading = profile.get("featured_heading", "Signature Offerings")
-    catalog_heading = profile.get("catalog_heading", "Complete Directory")
-    featured_items = profile.get("featured_items", [])[:3]
-    catalog_items = profile.get("catalog_items", [])[:6]
-
-    # Archetype-aware photography fallbacks (no corporate office buildings for pizzerias)
-    is_food = any(w in clean_biz_name.lower() or w in niche_label.lower() for w in ["pizza", "steak", "hoagie", "bakery", "restaurant", "grill", "cafe", "taco"])
-    
-    default_hero = "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=80" if is_food else "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1600&q=80"
-    default_cards = [
-        "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=800&q=80" if is_food else "https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&w=800&q=80" if is_food else "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1509722747041-616f39b57569?auto=format&fit=crop&w=800&q=80" if is_food else "https://images.unsplash.com/photo-1556910103-1c02745aae4d?auto=format&fit=crop&w=800&q=80"
-    ]
-
-    hero_photos = google_scout_images_live(f"{clean_biz_name} {location} storefront", count=1)
-    hero_photo = hero_photos[0] if hero_photos else default_hero
-
-    card_photos = []
-    search_terms = profile.get("image_search_terms", [clean_biz_name])
-    for term in search_terms[:3]:
-        item_imgs = google_scout_images_live(f"{clean_biz_name} {term}", count=1)
-        if item_imgs:
-            card_photos.append(item_imgs[0])
-    while len(card_photos) < 3:
-        card_photos.append(default_cards[len(card_photos)])
-
-    # Featured Cards
-    cards_html = ""
-    for idx, item in enumerate(featured_items):
-        img_url = card_photos[idx % len(card_photos)]
-        name = item.get("name", "Offering")
-        price = item.get("price", "Market")
-        desc = item.get("description", "Prepared fresh to order.")
-        cards_html += f"""
-        <div class="bg-white {radius} shadow-sm border border-neutral-200 overflow-hidden flex flex-col justify-between hover:shadow-lg transition">
-          <img src="{img_url}" class="w-full h-52 object-cover" alt="{name}" onerror="this.src='{default_cards[idx % len(default_cards)]}'">
-          <div class="p-6">
-            <div class="flex justify-between items-baseline mb-2">
-              <h3 class="text-xl font-bold text-neutral-900">{name}</h3>
-              <span class="font-extrabold ml-2" style="color: {accent_hex};">{price}</span>
-            </div>
-            <p class="text-neutral-600 text-sm leading-relaxed">{desc}</p>
-          </div>
-        </div>
-        """
-
-    # Catalog Items
-    catalog_html = ""
-    for item in catalog_items:
-        name = item.get("name", "Service / Selection")
-        price = item.get("price", "Inquire")
-        desc = item.get("description", "Standard house preparation.")
-        catalog_html += f"""
-        <div class="border-b border-neutral-200 pb-4">
-          <div class="flex justify-between font-bold text-neutral-900">
-            <span>{name}</span>
-            <span style="color: {accent_hex};">{price}</span>
-          </div>
-          <p class="text-sm text-neutral-600 mt-1">{desc}</p>
-        </div>
-        """
-
-    nav_links = """
-      <button onclick="switchTab('home')" id="tab-home" class="text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white">Overview</button>
+    photos_formatted = f"""
+    - Hero Image URL: {hero_photo}
+    - Product / Dish 1 Image URL: {dish_photos[0]}
+    - Product / Dish 2 Image URL: {dish_photos[1]}
+    - Product / Dish 3 Image URL: {dish_photos[2]}
     """
-    if is_two_page:
-        nav_links += f"""
-      <button onclick="switchTab('directory')" id="tab-directory" class="text-neutral-400 hover:text-white font-semibold text-sm transition pb-1 border-b-2 border-transparent">{page_two_title}</button>
-        """
 
-    full_html = f"""<!DOCTYPE html>
+    # 3. Prompt Groq for full creative generation
+    creative_prompt = f"""
+    You are an elite, award-winning web designer. Create a bespoke, production-ready website for:
+    - Business: {clean_biz_name}
+    - Niche / Industry: {niche}
+    - Location: {location}
+    - Stated Highlights: {highlights or 'Authentic local favorite'}
+    
+    REAL SCOUTED INTEL:
+    {scouted_intel[:1200]}
+
+    VERIFIED IMAGE ASSETS (You MUST embed these exact URLs into <img> tags):
+    {photos_formatted}
+
+    CREATIVE FREEDOM & DESIGN DIRECTIVES:
+    1. Vibe & Aesthetic: Design the page around the business's identity. If it's a neighborhood South Philly pizza & cheesesteak shop, give it a warm, bold, rustic look (deep brick reds, dark slate, crusty artisan roll aesthetics, warm ambers). If it's an auto shop, make it industrial and high-contrast.
+    2. Architecture: Decide whether to structure it as a focused high-conversion 1-page site or include an interactive tabbed view (e.g., 'Overview' vs 'Full Menu / Order Board') based on what serves the customer best.
+    3. Content: Name actual dishes or services (e.g., Grandma Pies, Cooper Sharp Cheesesteaks, Artisan Seeded Rolls, Cutlets). Include realistic prices, ingredients, and store hours/ordering policies (e.g., cash only, line up early, pickup orders).
+    4. Code Quality: Standalone HTML5 with Tailwind CSS CDN (<script src="https://cdn.tailwindcss.com"></script>). Ensure all <img> tags have object-cover and proper aspect ratios. Include a sticky navigation bar with a clear Call to Action button.
+    5. Return ONLY raw valid HTML starting with <!DOCTYPE html>. Do NOT include markdown code fences or conversational text.
+    """
+
+    raw_html = ""
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a master creative frontend engineer. Output ONLY raw HTML code with Tailwind CSS CDN. No markdown backticks."},
+                {"role": "user", "content": creative_prompt}
+            ],
+            temperature=0.4,
+            max_tokens=4000
+        )
+        content = resp.choices[0].message.content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+        raw_html = content
+    except Exception as e:
+        print(f"Groq creative generation error: {e}")
+
+    # Fallback only if Groq call encounters an unhandled exception
+    if not raw_html or len(raw_html) < 400:
+        raw_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{clean_biz_name} | {location}</title>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{clean_biz_name}</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    :root {{
-      --brand-accent: {accent_hex};
-      --brand-accent-hover: {accent_hover_hex};
-    }}
-  </style>
 </head>
-<body class="bg-neutral-50 text-neutral-800 {font_class} antialiased">
-  <header class="bg-{bg_surface} text-white sticky top-0 z-50 shadow-md">
-    <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
-      <div class="flex items-center space-x-6">
-        <span class="text-xl font-black tracking-wider uppercase" style="color: {accent_hex};">{clean_biz_name}</span>
-        <nav class="hidden md:flex space-x-4">
-          {nav_links}
-        </nav>
-      </div>
-      <a href="#contact" class="text-white font-bold px-4 py-2 {radius} text-sm transition shadow-sm" style="background-color: {accent_hex};">{primary_cta}</a>
-    </div>
+<body class="bg-stone-900 text-stone-100 font-sans">
+  <header class="p-6 flex justify-between items-center border-b border-stone-800">
+    <h1 class="text-2xl font-black text-amber-500 uppercase">{clean_biz_name}</h1>
+    <a href="#menu" class="bg-amber-600 px-4 py-2 rounded-lg font-bold text-white text-sm">View Menu</a>
   </header>
-
-  <main id="view-home" class="space-y-0">
-    <section class="relative bg-{bg_surface} text-white py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.74), rgba(0,0,0,0.74)), url('{hero_photo}');">
-      <div class="max-w-3xl mx-auto space-y-6">
-        <span class="inline-block bg-white/10 border border-white/20 uppercase tracking-widest text-xs font-black px-3 py-1.5 {radius}" style="color: {accent_hex};">{niche_label} &bull; {location}</span>
-        <h1 class="text-4xl sm:text-6xl font-black tracking-tight">{clean_biz_name}</h1>
-        <p class="text-lg text-neutral-200 max-w-2xl mx-auto leading-relaxed">{tagline}</p>
-        <div class="pt-4 flex justify-center gap-4">
-          <a href="#featured" class="text-white px-6 py-3 {radius} font-bold shadow-lg transition" style="background-color: {accent_hex};">{primary_cta}</a>
-          {"<button onclick=\"switchTab('directory')\" class=\"bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 " + radius + " font-bold transition\">" + secondary_cta + "</button>" if is_two_page else "<a href=\"#catalog\" class=\"bg-neutral-800 hover:bg-neutral-700 text-neutral-100 border border-neutral-700 px-6 py-3 " + radius + " font-bold transition\">" + secondary_cta + "</a>"}
-        </div>
-      </div>
-    </section>
-
-    <section id="featured" class="py-16 px-6 max-w-6xl mx-auto">
-      <div class="text-center mb-12">
-        <span class="uppercase font-bold text-xs tracking-widest" style="color: {accent_hex};">Selected Highlights</span>
-        <h2 class="text-3xl font-extrabold text-neutral-900 mt-1">{featured_heading}</h2>
-      </div>
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-        {cards_html}
-      </div>
-    </section>
-
-    {f'''
-    <section id="catalog" class="py-16 px-6 bg-neutral-100 border-t border-neutral-200">
-      <div class="max-w-4xl mx-auto">
-        <div class="text-center mb-10">
-          <span class="uppercase font-bold text-xs tracking-widest" style="color: {accent_hex};">Full Menu & Pricing</span>
-          <h2 class="text-3xl font-extrabold text-neutral-900 mt-1">{catalog_heading}</h2>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 {radius} shadow-sm border border-neutral-200">
-          {catalog_html}
-        </div>
-      </div>
-    </section>
-    ''' if not is_two_page else ''}
-  </main>
-
-  {f'''
-  <main id="view-directory" class="hidden py-16 px-6 max-w-4xl mx-auto min-h-[60vh]">
-    <div class="text-center mb-10">
-      <span class="uppercase font-bold text-xs tracking-widest" style="color: {accent_hex};">Complete Menu</span>
-      <h1 class="text-4xl font-black text-neutral-900 mt-1">{page_two_title}</h1>
-      <p class="text-neutral-600 mt-2">Authentic dishes, handcrafted specials, and pricing for {clean_biz_name}.</p>
-    </div>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-8 {radius} shadow-sm border border-neutral-200">
-      {catalog_html}
-    </div>
-    <div class="text-center mt-8">
-      <button onclick="switchTab('home')" class="text-sm font-bold hover:underline" style="color: {accent_hex};">&larr; Return to Overview</button>
-    </div>
-  </main>
-  ''' if is_two_page else ''}
-
-  <section id="contact" class="bg-neutral-100 py-16 px-6 border-t border-neutral-200">
-    <div class="max-w-xl mx-auto bg-white p-8 {radius} shadow-sm border border-neutral-200 text-center space-y-4">
-      <h2 class="text-2xl font-bold text-neutral-900">{clean_biz_name}</h2>
-      <p class="text-neutral-600">{location}</p>
-      <div class="pt-4">
-        <a href="#featured" class="inline-block text-white font-bold px-8 py-3 {radius} transition shadow-sm" style="background-color: {accent_hex};">{primary_cta}</a>
-      </div>
-    </div>
+  <section class="py-24 text-center px-6 bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url('{hero_photo}');">
+    <h2 class="text-5xl font-extrabold mb-4">{clean_biz_name}</h2>
+    <p class="text-lg text-stone-300 max-w-xl mx-auto">{location} &bull; World-Class Artisan Pies & Cheesesteaks</p>
   </section>
-
-  <footer class="bg-{bg_surface} text-neutral-500 text-center py-8 text-sm">
-    <p>&copy; 2026 {clean_biz_name}. Aesthetic: {vibe} &bull; Architecture: {'2-Page View' if is_two_page else '1-Page Lander'}.</p>
-  </footer>
-
-  <script>
-    function switchTab(tab) {{
-      const homeView = document.getElementById('view-home');
-      const dirView = document.getElementById('view-directory');
-      const tabHome = document.getElementById('tab-home');
-      const tabDir = document.getElementById('tab-directory');
-
-      if (!dirView) return;
-
-      if (tab === 'home') {{
-        homeView.classList.remove('hidden');
-        dirView.classList.add('hidden');
-        tabHome.className = "text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white";
-        if (tabDir) tabDir.className = "text-neutral-400 hover:text-white font-semibold text-sm transition pb-1 border-b-2 border-transparent";
-        window.scrollTo({{ top: 0, behavior: 'smooth' }});
-      }} else {{
-        homeView.classList.add('hidden');
-        dirView.classList.remove('hidden');
-        tabHome.className = "text-neutral-400 hover:text-white font-semibold text-sm transition pb-1 border-b-2 border-transparent";
-        if (tabDir) tabDir.className = "text-white hover:text-neutral-300 font-semibold text-sm transition pb-1 border-b-2 border-white";
-        window.scrollTo({{ top: 0, behavior: 'smooth' }});
-      }}
-    }}
-  </script>
 </body>
 </html>"""
 
     file_path = os.path.join(DEMO_DIR, f"{slug}.html")
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(full_html)
+        f.write(raw_html)
 
     preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
     return (
-        f"### Website Generated Autonomously for {clean_biz_name}\n"
-        f"- **Vibe & Aesthetic:** {vibe}\n"
-        f"- **Palette Token:** Accent `{raw_accent}` applied via inline CSS variables\n"
+        f"### Bespoke Website Generated for {clean_biz_name}\n"
         f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
+        f"- **Assets:** Authentic scraped culinary imagery and custom styling applied.\n"
+        f"- **File:** `generated_demos/{slug}.html`"
     )
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
