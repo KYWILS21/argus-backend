@@ -242,7 +242,8 @@ def generate_client_website_tool(
 
     # 3. Prompt Groq for full creative generation
     creative_prompt = f"""
-    You are an elite, award-winning web designer. Create a bespoke, production-ready website for:
+    You are an elite, award-winning front-end developer and conversion copywriter.
+    Build an interactive, high-converting demo website for:
     - Business: {clean_biz_name}
     - Niche / Industry: {niche}
     - Location: {location}
@@ -251,15 +252,22 @@ def generate_client_website_tool(
     REAL SCOUTED INTEL:
     {scouted_intel[:1200]}
 
-    VERIFIED IMAGE ASSETS (You MUST embed these exact URLs into <img> tags):
+    VERIFIED IMAGE ASSETS:
     {photos_formatted}
 
-    CREATIVE FREEDOM & DESIGN DIRECTIVES:
-    1. Vibe & Aesthetic: Design the page around the business's identity. If it's a neighborhood South Philly pizza & cheesesteak shop, give it a warm, bold, rustic look (deep brick reds, dark slate, crusty artisan roll aesthetics, warm ambers). If it's an auto shop, make it industrial and high-contrast.
-    2. Architecture: Decide whether to structure it as a focused high-conversion 1-page site or include an interactive tabbed view (e.g., 'Overview' vs 'Full Menu / Order Board') based on what serves the customer best.
-    3. Content: Name actual dishes or services (e.g., Grandma Pies, Cooper Sharp Cheesesteaks, Artisan Seeded Rolls, Cutlets). Include realistic prices, ingredients, and store hours/ordering policies (e.g., cash only, line up early, pickup orders).
-    4. Code Quality: Standalone HTML5 with Tailwind CSS CDN (<script src="https://cdn.tailwindcss.com"></script>). Ensure all <img> tags have object-cover and proper aspect ratios. Include a sticky navigation bar with a clear Call to Action button.
-    5. Return ONLY raw valid HTML starting with <!DOCTYPE html>. Do NOT include markdown code fences or conversational text.
+    INTERACTIVITY & COMPONENT REQUIREMENTS:
+    1. Interactive Cart / Drawer:
+       - Include a floating cart button with a dynamic badge count at the bottom-right or in the sticky navbar.
+       - A slide-over cart drawer (hidden by default) that opens when the cart icon or any 'Add to Order' button is clicked.
+       - The cart must display: added items, quantity adjustments (+ / -), calculated subtotal, and a 'Place Mock Order' button that triggers a clean simulated order confirmation modal.
+    2. Category Filter Bar:
+       - Include responsive filter tabs above the menu/service cards (e.g., 'All', 'Signature Pies', 'Cheesesteaks & Sandwiches', 'Sides & Drinks') that show/hide cards dynamically using simple Vanilla JS classes.
+    3. Interactive Item Cards:
+       - Every card must have an 'Add to Order' or 'Select' button wired with an `onclick="addToCart(name, price)"` handler.
+    4. Code Delivery:
+       - Standalone valid HTML5 with Tailwind CSS CDN (<script src="https://cdn.tailwindcss.com"></script>).
+       - Include all JavaScript embedded inline in a <script> tag before </body>. Ensure all button clicks are fully functional without external dependencies or page reloads.
+       - Return ONLY raw HTML starting with <!DOCTYPE html>. No markdown backticks.
     """
 
     raw_html = ""
@@ -281,27 +289,228 @@ def generate_client_website_tool(
     except Exception as e:
         print(f"Groq creative generation error: {e}")
 
-    # Fallback only if Groq call encounters an unhandled exception
-    if not raw_html or len(raw_html) < 400:
+    # High-converting interactive fallback template
+    if not raw_html or len(raw_html) < 600:
         raw_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{clean_biz_name}</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{clean_biz_name} | South Philly</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-stone-900 text-stone-100 font-sans">
-  <header class="p-6 flex justify-between items-center border-b border-stone-800">
-    <h1 class="text-2xl font-black text-amber-500 uppercase">{clean_biz_name}</h1>
-    <a href="#menu" class="bg-amber-600 px-4 py-2 rounded-lg font-bold text-white text-sm">View Menu</a>
+<body class="bg-stone-950 text-stone-100 font-sans antialiased selection:bg-amber-500 selection:text-stone-950 pb-20">
+
+  <!-- Sticky Header -->
+  <header class="bg-stone-900/90 backdrop-blur-md border-b border-stone-800 sticky top-0 z-40">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
+      <div class="flex items-center space-x-3">
+        <span class="text-xl font-black tracking-wider uppercase text-amber-500">{clean_biz_name}</span>
+        <span class="hidden sm:inline-block text-xs bg-stone-800 text-stone-400 px-2 py-1 rounded">South Philly</span>
+      </div>
+      <div class="flex items-center space-x-4">
+        <button onclick="toggleCart()" class="relative bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition">
+          <span>Your Bag</span>
+          <span id="cart-badge" class="bg-stone-950 text-amber-400 text-xs px-2 py-0.5 rounded-full font-black">0</span>
+        </button>
+      </div>
+    </div>
   </header>
-  <section class="py-24 text-center px-6 bg-cover bg-center" style="background-image: linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url('{hero_photo}');">
-    <h2 class="text-5xl font-extrabold mb-4">{clean_biz_name}</h2>
-    <p class="text-lg text-stone-300 max-w-xl mx-auto">{location} &bull; World-Class Artisan Pies & Cheesesteaks</p>
+
+  <!-- Hero Section -->
+  <section class="relative py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(12,10,9,0.78), rgba(12,10,9,0.85)), url('{hero_photo}');">
+    <div class="max-w-3xl mx-auto space-y-6">
+      <span class="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 uppercase tracking-widest text-xs font-bold px-3 py-1.5 rounded-full">South Philadelphia Artisan Standard</span>
+      <h1 class="text-4xl sm:text-6xl font-black tracking-tight text-white">{clean_biz_name}</h1>
+      <p class="text-lg text-stone-300 max-w-xl mx-auto leading-relaxed">Legendary seeded rolls, house-stretched mozzarella, authentic coal-fired crusts, and chopped Cooper Sharp cheesesteaks.</p>
+      <div class="pt-2 flex justify-center gap-4">
+        <a href="#menu" class="bg-amber-500 hover:bg-amber-600 text-stone-950 px-6 py-3 rounded-xl font-bold shadow-lg transition">Explore Menu & Order</a>
+      </div>
+    </div>
   </section>
+
+  <!-- Interactive Category Filter -->
+  <section id="menu" class="max-w-6xl mx-auto px-6 pt-16">
+    <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
+      <div>
+        <h2 class="text-3xl font-black text-white">Featured Menu</h2>
+        <p class="text-stone-400 text-sm mt-1">Select an item to add directly to your order bag.</p>
+      </div>
+      <div class="flex gap-2 bg-stone-900 p-1.5 rounded-xl border border-stone-800">
+        <button onclick="filterCategory('all')" id="tab-all" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition">All</button>
+        <button onclick="filterCategory('pizza')" id="tab-pizza" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Pies</button>
+        <button onclick="filterCategory('steaks')" id="tab-steaks" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Steaks & Hoagies</button>
+      </div>
+    </div>
+
+    <!-- Dish Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+      <!-- Item 1 -->
+      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between" data-category="steaks">
+        <img src="{dish_photos[0]}" class="w-full h-52 object-cover" alt="Cheesesteak">
+        <div class="p-6">
+          <div class="flex justify-between items-baseline mb-2">
+            <h3 class="text-lg font-bold text-white">Cooper Sharp Cheesesteak</h3>
+            <span class="text-amber-400 font-extrabold">$15.50</span>
+          </div>
+          <p class="text-stone-400 text-xs leading-relaxed mb-6">Thinly sliced fresh ribeye chopped on seeded bread, caramelized onions, and melted Cooper Sharp cheese.</p>
+          <button onclick="addToCart('Cooper Sharp Cheesesteak', 15.50)" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
+        </div>
+      </div>
+
+      <!-- Item 2 -->
+      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between" data-category="pizza">
+        <img src="{dish_photos[1]}" class="w-full h-52 object-cover" alt="Grandma Pie">
+        <div class="p-6">
+          <div class="flex justify-between items-baseline mb-2">
+            <h3 class="text-lg font-bold text-white">Grandma Pan Pizza</h3>
+            <span class="text-amber-400 font-extrabold">$22.00</span>
+          </div>
+          <p class="text-stone-400 text-xs leading-relaxed mb-6">Crisp square thick crust baked with crushed San Marzano tomatoes, fresh garlic, sweet basil, and mozzarella.</p>
+          <button onclick="addToCart('Grandma Pan Pizza', 22.00)" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
+        </div>
+      </div>
+
+      <!-- Item 3 -->
+      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between" data-category="steaks">
+        <img src="{dish_photos[2]}" class="w-full h-52 object-cover" alt="Cutlet Sandwich">
+        <div class="p-6">
+          <div class="flex justify-between items-baseline mb-2">
+            <h3 class="text-lg font-bold text-white">Chicken Cutlet Supreme</h3>
+            <span class="text-amber-400 font-extrabold">$16.00</span>
+          </div>
+          <p class="text-stone-400 text-xs leading-relaxed mb-6">Breaded hand-cut cutlet on seeded roll with sautéed broccoli rabe, sharp provolone, and roasted peppers.</p>
+          <button onclick="addToCart('Chicken Cutlet Supreme', 16.00)" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Slide-Over Cart Drawer -->
+  <div id="cart-drawer" class="fixed inset-0 z-50 pointer-events-none transition-opacity duration-300 opacity-0">
+    <div onclick="toggleCart()" class="absolute inset-0 bg-stone-950/70 backdrop-blur-sm"></div>
+    <div class="absolute right-0 top-0 h-full w-full max-w-md bg-stone-900 border-l border-stone-800 p-6 flex flex-col justify-between pointer-events-auto transform transition-transform duration-300 translate-x-full" id="cart-panel">
+      <div>
+        <div class="flex justify-between items-center pb-4 border-b border-stone-800">
+          <h2 class="text-xl font-bold text-white">Your Order</h2>
+          <button onclick="toggleCart()" class="text-stone-400 hover:text-white text-sm">✕ Close</button>
+        </div>
+        <div id="cart-items" class="py-4 space-y-3 overflow-y-auto max-h-[60vh]">
+          <p class="text-stone-500 text-sm text-center py-8">Your bag is empty. Add an item from the menu!</p>
+        </div>
+      </div>
+      <div class="pt-4 border-t border-stone-800 space-y-4">
+        <div class="flex justify-between text-stone-300 text-sm">
+          <span>Subtotal</span>
+          <span id="cart-subtotal" class="font-bold text-white">$0.00</span>
+        </div>
+        <button onclick="triggerCheckout()" class="w-full bg-amber-500 hover:bg-amber-600 text-stone-950 font-black py-3 rounded-xl text-sm transition">Proceed to Pickup Order</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mock Order Confirmation Modal -->
+  <div id="checkout-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/80 backdrop-blur-sm hidden">
+    <div class="bg-stone-900 border border-stone-800 rounded-2xl max-w-sm w-full p-6 text-center space-y-4">
+      <div class="w-12 h-12 bg-amber-500/20 text-amber-400 rounded-full flex items-center justify-center mx-auto text-xl font-bold">✓</div>
+      <h3 class="text-xl font-bold text-white">Order Sent to Kitchen</h3>
+      <p class="text-xs text-stone-400">This demo features fully operational client-side ordering configured by ARGUS.</p>
+      <div class="bg-stone-950 p-3 rounded-xl text-xs text-stone-300 text-left font-mono">
+        <div>Pickup: 20-30 Mins</div>
+        <div>Ticket: #AG-7402</div>
+      </div>
+      <button onclick="closeCheckout()" class="w-full bg-stone-800 hover:bg-stone-700 text-white font-bold py-2 rounded-xl text-xs">Back to Demo</button>
+    </div>
+  </div>
+
+  <script>
+    let cart = [];
+
+    function toggleCart() {{
+      const drawer = document.getElementById('cart-drawer');
+      const panel = document.getElementById('cart-panel');
+      const isOpen = !drawer.classList.contains('opacity-0');
+      
+      if (isOpen) {{
+        drawer.classList.add('opacity-0', 'pointer-events-none');
+        panel.classList.add('translate-x-full');
+      }} else {{
+        drawer.classList.remove('opacity-0', 'pointer-events-none');
+        panel.classList.remove('translate-x-full');
+      }}
+    }}
+
+    function addToCart(name, price) {{
+      const existing = cart.find(i => i.name === name);
+      if (existing) {{
+        existing.qty += 1;
+      }} else {{
+        cart.push({{ name, price, qty: 1 }});
+      }}
+      renderCart();
+      toggleCart();
+    }}
+
+    function renderCart() {{
+      const container = document.getElementById('cart-items');
+      const badge = document.getElementById('cart-badge');
+      const subtotalEl = document.getElementById('cart-subtotal');
+
+      const totalQty = cart.reduce((sum, i) => sum + i.qty, 0);
+      const subtotal = cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
+
+      badge.innerText = totalQty;
+      subtotalEl.innerText = '$' + subtotal.toFixed(2);
+
+      if (cart.length === 0) {{
+        container.innerHTML = '<p class="text-stone-500 text-sm text-center py-8">Your bag is empty.</p>';
+        return;
+      }}
+
+      container.innerHTML = cart.map((item, idx) => `
+        <div class="flex justify-between items-center bg-stone-950 p-3 rounded-xl border border-stone-800">
+          <div>
+            <div class="text-sm font-bold text-white">${{item.name}}</div>
+            <div class="text-xs text-amber-400 font-mono">$${{item.price.toFixed(2)}} each</div>
+          </div>
+          <div class="flex items-center space-x-2">
+            <span class="text-xs font-bold bg-stone-800 px-2 py-1 rounded text-stone-300">x${{item.qty}}</span>
+          </div>
+        </div>
+      `).join('');
+    }}
+
+    function filterCategory(cat) {{
+      const items = document.querySelectorAll('.menu-item');
+      const btns = document.querySelectorAll('.cat-btn');
+
+      btns.forEach(b => b.className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition");
+      document.getElementById('tab-' + cat).className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition";
+
+      items.forEach(el => {{
+        if (cat === 'all' || el.getAttribute('data-category') === cat) {{
+          el.classList.remove('hidden');
+        }} else {{
+          el.classList.add('hidden');
+        }}
+      }});
+    }}
+
+    function triggerCheckout() {{
+      if (cart.length === 0) return;
+      toggleCart();
+      document.getElementById('checkout-modal').classList.remove('hidden');
+    }}
+
+    function closeCheckout() {{
+      document.getElementById('checkout-modal').classList.add('hidden');
+      cart = [];
+      renderCart();
+    }}
+  </script>
 </body>
 </html>"""
-
+        
     file_path = os.path.join(DEMO_DIR, f"{slug}.html")
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(raw_html)
