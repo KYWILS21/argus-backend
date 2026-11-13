@@ -182,34 +182,27 @@ def google_scout_intel(business_name: str, location: str) -> str:
     return "\n".join(raw_snippets) if raw_snippets else f"Local establishment located in {location}."
 
 
-def scout_authentic_images(query: str, count: int = 4) -> List[str]:
-    """Scrapes direct, authentic photo URLs via DDGS without triggering bot blocks."""
-    image_urls = []
-    try:
-        with DDGS() as ddgs:
-            # Query for real food, storefront, or shop photos
-            results = list(ddgs.images(f"{query} real photography", max_results=count * 2))
-            for r in results:
-                url = r.get("image")
-                if url and url.startswith("http") and not any(b in url.lower() for b in [".svg", "logo", "icon", "favicon", "1x1"]):
-                    image_urls.append(url)
-                    if len(image_urls) >= count:
-                        break
-    except Exception as e:
-        print(f"Image search error for '{query}': {e}")
-
-    # Fallback to authentic Unsplash culinary/business photography if search yields nothing
-    fallbacks = [
-        "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=80",
-        "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1509722747041-616f39b57569?auto=format&fit=crop&w=800&q=80"
+def scout_authentic_dish_image(business_name: str, item_name: str, niche: str) -> str:
+    """Scrapes a specific food item or product photo for a given business."""
+    # Priority 1: Business name + specific dish
+    queries = [
+        f"{business_name} {item_name} food photography close up",
+        f"{item_name} {niche} high resolution food"
     ]
-    while len(image_urls) < count:
-        image_urls.append(fallbacks[len(image_urls) % len(fallbacks)])
+    
+    for q in queries:
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.images(q, max_results=4))
+                for r in results:
+                    url = r.get("image")
+                    if url and url.startswith("http") and not any(b in url.lower() for b in [".svg", "logo", "icon", "favicon", "1x1", "storefront", "building"]):
+                        return url
+        except Exception as e:
+            print(f"Dish image search error for '{q}': {e}")
 
-    return image_urls[:count]
-
+    # Fallback high-res food stock if live scrape misses
+    return "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=800&q=80"
 
 def generate_client_website_tool(
     business_name: str, 
@@ -224,14 +217,27 @@ def generate_client_website_tool(
     if not slug:
         slug = f"demo-{int(time.time())}"
 
-    # 2. Scout real business data and live photos
+    # 1. Scout intel & extract offerings
     print(f"ARGUS Scouting live intel for '{clean_biz_name}' in '{location}'...")
     scouted_intel = google_scout_intel(clean_biz_name, location)
+
+    # 2. Extract profile and dish/item names first
+    profile = extract_structured_business_profile(clean_biz_name, location, scouted_intel)
+    featured_items = profile.get("featured_items", [])[:3]
+
+    # 3. Targeted Photo Harvesting: Storefront for Hero, Food Close-Ups for Cards
+    hero_photo = scout_authentic_dish_image(clean_biz_name, "storefront interior dining", niche)
     
-    # Extract authentic photography for the business and its signature products
-    scouted_photos = scout_authentic_images(f"{clean_biz_name} {location}", count=5)
-    hero_photo = scouted_photos[0]
-    dish_photos = scouted_photos[1:5]
+    dish_photos = []
+    for item in featured_items:
+        item_name = item.get("name", "signature dish")
+        print(f"Scouting dedicated food photo for: {item_name}...")
+        img_url = scout_authentic_dish_image(clean_biz_name, item_name, niche)
+        dish_photos.append(img_url)
+
+    # Ensure at least 3 photos exist
+    while len(dish_photos) < 3:
+        dish_photos.append("https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=80")
 
     photos_formatted = f"""
     - Hero Image URL: {hero_photo}
