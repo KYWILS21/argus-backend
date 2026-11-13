@@ -157,9 +157,10 @@ async def favicon():
     return Response(status_code=204)
 
 def google_scout_intel(business_name: str, location: str) -> str:
+    """Queries Google to extract real menus, offerings, pricing, and operating details."""
     queries = [
-        f"{business_name} {location} services prices reviews hours",
-        f"{business_name} {location} popular offerings about"
+        f"{business_name} {location} menu services prices reviews hours",
+        f"{business_name} {location} signature dishes popular items about"
     ]
     raw_snippets = []
     for q in queries:
@@ -179,30 +180,72 @@ def google_scout_intel(business_name: str, location: str) -> str:
                     raw_snippets.append(clean)
         except Exception as e:
             print(f"Scout fetch error for query '{q}': {e}")
-    return "\n".join(raw_snippets) if raw_snippets else f"Local establishment located in {location}."
+    return "\n".join(raw_snippets) if raw_snippets else f"Authentic local establishment in {location}."
 
 
-def scout_authentic_dish_image(business_name: str, item_name: str, niche: str) -> str:
-    """Scrapes a specific food item or product photo for a given business."""
-    # Priority 1: Business name + specific dish
+def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
+    """Extracts specific signature dishes or services so ARGUS can search for item-specific photos."""
+    prompt = f"""
+    Analyze "{business_name}" in "{location}" using this search data:
+    {raw_intel[:1500]}
+
+    Extract 3 authentic signature items/dishes/services with realistic numerical prices and rich descriptions.
+    RETURN ONLY A STRICT JSON OBJECT:
+    {{
+      "tagline": "Compelling 10-15 word summary of why locals love this spot",
+      "featured_items": [
+        {{"name": "Cooper Sharp Cheesesteak", "price": 15.50, "category": "steaks", "description": "Thinly sliced ribeye on a fresh seeded roll with melted Cooper Sharp and fried onions."}},
+        {{"name": "Grandma Pan Pizza", "price": 22.00, "category": "pizza", "description": "Crisp square pan crust with crushed San Marzano tomatoes, fresh mozzarella, and basil."}},
+        {{"name": "Chicken Cutlet Italiano", "price": 16.00, "category": "steaks", "description": "Breaded chicken cutlet with sautéed broccoli rabe and sharp provolone on seeded bread."}}
+      ]
+    }}
+    """
+    try:
+        if not groq_client:
+            raise ValueError("Groq client not initialized")
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a data extraction engine. Output strictly valid JSON tailored to the exact business."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(resp.choices[0].message.content.strip())
+    except Exception as e:
+        print(f"Profile extraction fallback triggered: {e}")
+        return {
+            "tagline": f"Handcrafted quality, signature favorites, and dedicated service in {location}.",
+            "featured_items": [
+                {"name": "Cooper Sharp Cheesesteak", "price": 15.50, "category": "steaks", "description": "Thinly sliced fresh ribeye on house-baked seeded bread with caramelized onions and melted Cooper Sharp."},
+                {"name": "Grandma Square Pie", "price": 22.00, "category": "pizza", "description": "Crisp square pan pizza topped with crushed plum tomatoes, fresh garlic, basil, and aged mozzarella."},
+                {"name": "Chicken Cutlet Supreme", "price": 16.00, "category": "steaks", "description": "Hand-breaded chicken breast cutlet layered with bitter broccoli rabe and sharp provolone."}
+            ]
+        }
+
+
+def scout_authentic_dish_image(business_name: str, item_name: str, niche: str, fallback_url: str) -> str:
+    """Scrapes close-up food or product photography specifically matching the dish/service name."""
     queries = [
-        f"{business_name} {item_name} food photography close up",
-        f"{item_name} {niche} high resolution food"
+        f"{business_name} {item_name} food close up photo",
+        f"{item_name} {niche} appetizing photography"
     ]
+    bad_tokens = [".svg", "logo", "icon", "favicon", "1x1", "map", "streetview", "building", "exterior"]
     
     for q in queries:
         try:
             with DDGS() as ddgs:
-                results = list(ddgs.images(q, max_results=4))
+                results = list(ddgs.images(q, max_results=5))
                 for r in results:
-                    url = r.get("image")
-                    if url and url.startswith("http") and not any(b in url.lower() for b in [".svg", "logo", "icon", "favicon", "1x1", "storefront", "building"]):
+                    url = r.get("image", "")
+                    if url.startswith("http") and not any(b in url.lower() for b in bad_tokens):
                         return url
         except Exception as e:
             print(f"Dish image search error for '{q}': {e}")
 
-    # Fallback high-res food stock if live scrape misses
-    return "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=800&q=80"
+    return fallback_url
+
 
 def generate_client_website_tool(
     business_name: str, 
@@ -211,98 +254,80 @@ def generate_client_website_tool(
     contact_phone: Optional[str] = None, 
     highlights: Optional[str] = None
 ) -> str:
-    # 1. Clean business name to ensure short, clean URLs
+    # 1. Sanitize business name and URL slug
     clean_biz_name = re.split(r'\s+(?:and\s+just|and\s+make|with|featuring)\b', business_name, flags=re.IGNORECASE)[0].strip()
     slug = "".join(c for c in clean_biz_name.lower() if c.isalnum() or c == "-").strip("-")
     if not slug:
         slug = f"demo-{int(time.time())}"
 
-    # 1. Scout intel & extract offerings
+    # 2. Scout business intel & extract specific menu/service items
     print(f"ARGUS Scouting live intel for '{clean_biz_name}' in '{location}'...")
     scouted_intel = google_scout_intel(clean_biz_name, location)
-
-    # 2. Extract profile and dish/item names first
     profile = extract_structured_business_profile(clean_biz_name, location, scouted_intel)
+    
+    tagline = profile.get("tagline", f"Authentic local standard in {location}.")
     featured_items = profile.get("featured_items", [])[:3]
 
-    # 3. Targeted Photo Harvesting: Storefront for Hero, Food Close-Ups for Cards
-    hero_photo = scout_authentic_dish_image(clean_biz_name, "storefront interior dining", niche)
+    # Ensure 3 items exist
+    default_items = [
+        {"name": "Cooper Sharp Cheesesteak", "price": 15.50, "category": "steaks", "description": "Thinly sliced ribeye on seeded bread with melted Cooper Sharp."},
+        {"name": "Grandma Pan Pizza", "price": 22.00, "category": "pizza", "description": "Crisp square crust with crushed San Marzano tomatoes and fresh basil."},
+        {"name": "Chicken Cutlet Supreme", "price": 16.00, "category": "steaks", "description": "Breaded chicken cutlet with broccoli rabe and sharp provolone."}
+    ]
+    while len(featured_items) < 3:
+        featured_items.append(default_items[len(featured_items)])
+
+    # 3. Harvest close-up dish/item photography for each specific item
+    fallbacks = [
+        "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=80",
+        "https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&w=800&q=80",
+        "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=800&q=80",
+        "https://images.unsplash.com/photo-1509722747041-616f39b57569?auto=format&fit=crop&w=800&q=80"
+    ]
+
+    hero_photo = scout_authentic_dish_image(clean_biz_name, f"{featured_items[0]['name']} {featured_items[1]['name']}", niche, fallbacks[0])
     
     dish_photos = []
-    for item in featured_items:
-        item_name = item.get("name", "signature dish")
-        print(f"Scouting dedicated food photo for: {item_name}...")
-        img_url = scout_authentic_dish_image(clean_biz_name, item_name, niche)
-        dish_photos.append(img_url)
+    for idx, item in enumerate(featured_items):
+        item_name = item.get("name", "specialty dish")
+        print(f"ARGUS Harvesting close-up photo for: {item_name}...")
+        photo_url = scout_authentic_dish_image(clean_biz_name, item_name, niche, fallbacks[(idx + 1) % len(fallbacks)])
+        dish_photos.append(photo_url)
 
-    # Ensure at least 3 photos exist
-    while len(dish_photos) < 3:
-        dish_photos.append("https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=80")
+    # 4. Build interactive menu cards HTML with item-specific photos
+    cards_html = ""
+    for idx, item in enumerate(featured_items):
+        name = item.get("name", "Specialty Item")
+        raw_price = item.get("price", 15.00)
+        try:
+            price_num = float(str(raw_price).replace("$", "").strip())
+        except ValueError:
+            price_num = 15.00
+        cat = item.get("category", "all")
+        desc = item.get("description", "Prepared fresh daily.")
+        img_src = dish_photos[idx]
+        safe_name = name.replace("'", "\\'")
 
-    photos_formatted = f"""
-    - Hero Image URL: {hero_photo}
-    - Product / Dish 1 Image URL: {dish_photos[0]}
-    - Product / Dish 2 Image URL: {dish_photos[1]}
-    - Product / Dish 3 Image URL: {dish_photos[2]}
-    """
+        cards_html += f"""
+      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between hover:border-amber-500/50 transition" data-category="{cat}">
+        <img src="{img_src}" class="w-full h-56 object-cover" alt="{name}" onerror="this.src='{fallbacks[(idx + 1) % len(fallbacks)]}'">
+        <div class="p-6">
+          <div class="flex justify-between items-baseline mb-2">
+            <h3 class="text-lg font-bold text-white">{name}</h3>
+            <span class="text-amber-400 font-extrabold">${price_num:.2f}</span>
+          </div>
+          <p class="text-stone-400 text-xs leading-relaxed mb-6">{desc}</p>
+          <button onclick="addToCart('{safe_name}', {price_num:.2f})" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
+        </div>
+      </div>"""
 
-    # 3. Prompt Groq for full creative generation
-    creative_prompt = f"""
-    You are an elite, award-winning front-end developer and conversion copywriter.
-    Build an interactive, high-converting demo website for:
-    - Business: {clean_biz_name}
-    - Niche / Industry: {niche}
-    - Location: {location}
-    - Stated Highlights: {highlights or 'Authentic local favorite'}
-    
-    REAL SCOUTED INTEL:
-    {scouted_intel[:1200]}
-
-    VERIFIED IMAGE ASSETS:
-    {photos_formatted}
-
-    INTERACTIVITY & COMPONENT REQUIREMENTS:
-    1. Interactive Cart / Drawer:
-       - Include a floating cart button with a dynamic badge count at the bottom-right or in the sticky navbar.
-       - A slide-over cart drawer (hidden by default) that opens when the cart icon or any 'Add to Order' button is clicked.
-       - The cart must display: added items, quantity adjustments (+ / -), calculated subtotal, and a 'Place Mock Order' button that triggers a clean simulated order confirmation modal.
-    2. Category Filter Bar:
-       - Include responsive filter tabs above the menu/service cards (e.g., 'All', 'Signature Pies', 'Cheesesteaks & Sandwiches', 'Sides & Drinks') that show/hide cards dynamically using simple Vanilla JS classes.
-    3. Interactive Item Cards:
-       - Every card must have an 'Add to Order' or 'Select' button wired with an `onclick="addToCart(name, price)"` handler.
-    4. Code Delivery:
-       - Standalone valid HTML5 with Tailwind CSS CDN (<script src="https://cdn.tailwindcss.com"></script>).
-       - Include all JavaScript embedded inline in a <script> tag before </body>. Ensure all button clicks are fully functional without external dependencies or page reloads.
-       - Return ONLY raw HTML starting with <!DOCTYPE html>. No markdown backticks.
-    """
-
-    raw_html = ""
-    try:
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a master creative frontend engineer. Output ONLY raw HTML code with Tailwind CSS CDN. No markdown backticks."},
-                {"role": "user", "content": creative_prompt}
-            ],
-            temperature=0.4,
-            max_tokens=4000
-        )
-        content = resp.choices[0].message.content.strip()
-        if content.startswith("```"):
-            lines = content.splitlines()
-            content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-        raw_html = content
-    except Exception as e:
-        print(f"Groq creative generation error: {e}")
-
-    # High-converting interactive fallback template
-    if not raw_html or len(raw_html) < 600:
-        raw_html = f"""<!DOCTYPE html>
+    # 5. Assemble Full Interactive Application
+    raw_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{clean_biz_name} | South Philly</title>
+  <title>{clean_biz_name} | {location}</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-stone-950 text-stone-100 font-sans antialiased selection:bg-amber-500 selection:text-stone-950 pb-20">
@@ -312,10 +337,10 @@ def generate_client_website_tool(
     <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
       <div class="flex items-center space-x-3">
         <span class="text-xl font-black tracking-wider uppercase text-amber-500">{clean_biz_name}</span>
-        <span class="hidden sm:inline-block text-xs bg-stone-800 text-stone-400 px-2 py-1 rounded">South Philly</span>
+        <span class="hidden sm:inline-block text-xs bg-stone-800 text-stone-400 px-2.5 py-1 rounded-md">{location}</span>
       </div>
       <div class="flex items-center space-x-4">
-        <button onclick="toggleCart()" class="relative bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition">
+        <button onclick="toggleCart()" class="relative bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition shadow-md">
           <span>Your Bag</span>
           <span id="cart-badge" class="bg-stone-950 text-amber-400 text-xs px-2 py-0.5 rounded-full font-black">0</span>
         </button>
@@ -324,71 +349,33 @@ def generate_client_website_tool(
   </header>
 
   <!-- Hero Section -->
-  <section class="relative py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(12,10,9,0.78), rgba(12,10,9,0.85)), url('{hero_photo}');">
+  <section class="relative py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(12,10,9,0.78), rgba(12,10,9,0.88)), url('{hero_photo}');">
     <div class="max-w-3xl mx-auto space-y-6">
-      <span class="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 uppercase tracking-widest text-xs font-bold px-3 py-1.5 rounded-full">South Philadelphia Artisan Standard</span>
+      <span class="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 uppercase tracking-widest text-xs font-bold px-3 py-1.5 rounded-full">{niche} &bull; {location}</span>
       <h1 class="text-4xl sm:text-6xl font-black tracking-tight text-white">{clean_biz_name}</h1>
-      <p class="text-lg text-stone-300 max-w-xl mx-auto leading-relaxed">Legendary seeded rolls, house-stretched mozzarella, authentic coal-fired crusts, and chopped Cooper Sharp cheesesteaks.</p>
+      <p class="text-lg text-stone-300 max-w-xl mx-auto leading-relaxed">{tagline}</p>
       <div class="pt-2 flex justify-center gap-4">
         <a href="#menu" class="bg-amber-500 hover:bg-amber-600 text-stone-950 px-6 py-3 rounded-xl font-bold shadow-lg transition">Explore Menu & Order</a>
       </div>
     </div>
   </section>
 
-  <!-- Interactive Category Filter -->
+  <!-- Interactive Menu & Category Filter -->
   <section id="menu" class="max-w-6xl mx-auto px-6 pt-16">
     <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
       <div>
-        <h2 class="text-3xl font-black text-white">Featured Menu</h2>
-        <p class="text-stone-400 text-sm mt-1">Select an item to add directly to your order bag.</p>
+        <h2 class="text-3xl font-black text-white">Signature Lineup</h2>
+        <p class="text-stone-400 text-sm mt-1">Select any item below to customize and add to your pickup bag.</p>
       </div>
       <div class="flex gap-2 bg-stone-900 p-1.5 rounded-xl border border-stone-800">
-        <button onclick="filterCategory('all')" id="tab-all" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition">All</button>
+        <button onclick="filterCategory('all')" id="tab-all" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition">All Items</button>
         <button onclick="filterCategory('pizza')" id="tab-pizza" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Pies</button>
-        <button onclick="filterCategory('steaks')" id="tab-steaks" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Steaks & Hoagies</button>
+        <button onclick="filterCategory('steaks')" id="tab-steaks" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Steaks & Cutlets</button>
       </div>
     </div>
 
-    <!-- Dish Grid -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-      <!-- Item 1 -->
-      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between" data-category="steaks">
-        <img src="{dish_photos[0]}" class="w-full h-52 object-cover" alt="Cheesesteak">
-        <div class="p-6">
-          <div class="flex justify-between items-baseline mb-2">
-            <h3 class="text-lg font-bold text-white">Cooper Sharp Cheesesteak</h3>
-            <span class="text-amber-400 font-extrabold">$15.50</span>
-          </div>
-          <p class="text-stone-400 text-xs leading-relaxed mb-6">Thinly sliced fresh ribeye chopped on seeded bread, caramelized onions, and melted Cooper Sharp cheese.</p>
-          <button onclick="addToCart('Cooper Sharp Cheesesteak', 15.50)" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
-        </div>
-      </div>
-
-      <!-- Item 2 -->
-      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between" data-category="pizza">
-        <img src="{dish_photos[1]}" class="w-full h-52 object-cover" alt="Grandma Pie">
-        <div class="p-6">
-          <div class="flex justify-between items-baseline mb-2">
-            <h3 class="text-lg font-bold text-white">Grandma Pan Pizza</h3>
-            <span class="text-amber-400 font-extrabold">$22.00</span>
-          </div>
-          <p class="text-stone-400 text-xs leading-relaxed mb-6">Crisp square thick crust baked with crushed San Marzano tomatoes, fresh garlic, sweet basil, and mozzarella.</p>
-          <button onclick="addToCart('Grandma Pan Pizza', 22.00)" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
-        </div>
-      </div>
-
-      <!-- Item 3 -->
-      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between" data-category="steaks">
-        <img src="{dish_photos[2]}" class="w-full h-52 object-cover" alt="Cutlet Sandwich">
-        <div class="p-6">
-          <div class="flex justify-between items-baseline mb-2">
-            <h3 class="text-lg font-bold text-white">Chicken Cutlet Supreme</h3>
-            <span class="text-amber-400 font-extrabold">$16.00</span>
-          </div>
-          <p class="text-stone-400 text-xs leading-relaxed mb-6">Breaded hand-cut cutlet on seeded roll with sautéed broccoli rabe, sharp provolone, and roasted peppers.</p>
-          <button onclick="addToCart('Chicken Cutlet Supreme', 16.00)" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
-        </div>
-      </div>
+      {cards_html}
     </div>
   </section>
 
@@ -398,11 +385,11 @@ def generate_client_website_tool(
     <div class="absolute right-0 top-0 h-full w-full max-w-md bg-stone-900 border-l border-stone-800 p-6 flex flex-col justify-between pointer-events-auto transform transition-transform duration-300 translate-x-full" id="cart-panel">
       <div>
         <div class="flex justify-between items-center pb-4 border-b border-stone-800">
-          <h2 class="text-xl font-bold text-white">Your Order</h2>
+          <h2 class="text-xl font-bold text-white">Your Pickup Bag</h2>
           <button onclick="toggleCart()" class="text-stone-400 hover:text-white text-sm">✕ Close</button>
         </div>
         <div id="cart-items" class="py-4 space-y-3 overflow-y-auto max-h-[60vh]">
-          <p class="text-stone-500 text-sm text-center py-8">Your bag is empty. Add an item from the menu!</p>
+          <p class="text-stone-500 text-sm text-center py-8">Your bag is empty. Add a dish from the menu!</p>
         </div>
       </div>
       <div class="pt-4 border-t border-stone-800 space-y-4">
@@ -410,7 +397,7 @@ def generate_client_website_tool(
           <span>Subtotal</span>
           <span id="cart-subtotal" class="font-bold text-white">$0.00</span>
         </div>
-        <button onclick="triggerCheckout()" class="w-full bg-amber-500 hover:bg-amber-600 text-stone-950 font-black py-3 rounded-xl text-sm transition">Proceed to Pickup Order</button>
+        <button onclick="triggerCheckout()" class="w-full bg-amber-500 hover:bg-amber-600 text-stone-950 font-black py-3 rounded-xl text-sm transition">Place Pickup Order</button>
       </div>
     </div>
   </div>
@@ -420,12 +407,12 @@ def generate_client_website_tool(
     <div class="bg-stone-900 border border-stone-800 rounded-2xl max-w-sm w-full p-6 text-center space-y-4">
       <div class="w-12 h-12 bg-amber-500/20 text-amber-400 rounded-full flex items-center justify-center mx-auto text-xl font-bold">✓</div>
       <h3 class="text-xl font-bold text-white">Order Sent to Kitchen</h3>
-      <p class="text-xs text-stone-400">This demo features fully operational client-side ordering configured by ARGUS.</p>
+      <p class="text-xs text-stone-400">Interactive ordering prototype powered autonomously by ARGUS.</p>
       <div class="bg-stone-950 p-3 rounded-xl text-xs text-stone-300 text-left font-mono">
-        <div>Pickup: 20-30 Mins</div>
-        <div>Ticket: #AG-7402</div>
+        <div>Estimated Prep: 20-25 Mins</div>
+        <div>Ticket: #AG-8821</div>
       </div>
-      <button onclick="closeCheckout()" class="w-full bg-stone-800 hover:bg-stone-700 text-white font-bold py-2 rounded-xl text-xs">Back to Demo</button>
+      <button onclick="closeCheckout()" class="w-full bg-stone-800 hover:bg-stone-700 text-white font-bold py-2 rounded-xl text-xs">Return to Menu</button>
     </div>
   </div>
 
@@ -436,7 +423,6 @@ def generate_client_website_tool(
       const drawer = document.getElementById('cart-drawer');
       const panel = document.getElementById('cart-panel');
       const isOpen = !drawer.classList.contains('opacity-0');
-      
       if (isOpen) {{
         drawer.classList.add('opacity-0', 'pointer-events-none');
         panel.classList.add('translate-x-full');
@@ -473,15 +459,13 @@ def generate_client_website_tool(
         return;
       }}
 
-      container.innerHTML = cart.map((item, idx) => `
+      container.innerHTML = cart.map(item => `
         <div class="flex justify-between items-center bg-stone-950 p-3 rounded-xl border border-stone-800">
           <div>
             <div class="text-sm font-bold text-white">${{item.name}}</div>
             <div class="text-xs text-amber-400 font-mono">$${{item.price.toFixed(2)}} each</div>
           </div>
-          <div class="flex items-center space-x-2">
-            <span class="text-xs font-bold bg-stone-800 px-2 py-1 rounded text-stone-300">x${{item.qty}}</span>
-          </div>
+          <span class="text-xs font-bold bg-stone-800 px-2.5 py-1 rounded text-stone-300">x${{item.qty}}</span>
         </div>
       `).join('');
     }}
@@ -489,9 +473,9 @@ def generate_client_website_tool(
     function filterCategory(cat) {{
       const items = document.querySelectorAll('.menu-item');
       const btns = document.querySelectorAll('.cat-btn');
-
       btns.forEach(b => b.className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition");
-      document.getElementById('tab-' + cat).className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition";
+      const activeBtn = document.getElementById('tab-' + cat);
+      if (activeBtn) activeBtn.className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition";
 
       items.forEach(el => {{
         if (cat === 'all' || el.getAttribute('data-category') === cat) {{
@@ -516,16 +500,16 @@ def generate_client_website_tool(
   </script>
 </body>
 </html>"""
-        
+
     file_path = os.path.join(DEMO_DIR, f"{slug}.html")
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(raw_html)
 
     preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
     return (
-        f"### Bespoke Website Generated for {clean_biz_name}\n"
+        f"### Website Generated for {clean_biz_name}\n"
         f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
-        f"- **Assets:** Authentic scraped culinary imagery and custom styling applied.\n"
+        f"- **Assets:** Targeted close-up food photography & interactive ordering drawer enabled.\n"
         f"- **File:** `generated_demos/{slug}.html`"
     )
 
