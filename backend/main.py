@@ -39,14 +39,18 @@ except ImportError:
 # Configuration & Initialization
 # ==============================================================================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-raw_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip().strip('"').strip("'")
+# --- CORE CONFIGURATION & GLOBALS ---
+ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "argus-secret-key-2026")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 RAW_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-# Prevent invalid or deprecated model strings from breaking Groq calls
 if "gpt-oss" in RAW_GROQ_MODEL or not RAW_GROQ_MODEL:
     GROQ_MODEL = "llama-3.3-70b-versatile"
 else:
-    GROQ_MODEL = RAW_GROQ_MODELARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token").strip()
+    GROQ_MODEL = RAW_GROQ_MODEL
+
+DEMO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_demos")
+os.makedirs(DEMO_DIR, exist_ok=True)
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
 
