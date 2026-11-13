@@ -41,8 +41,12 @@ except ImportError:
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 raw_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip().strip('"').strip("'")
-GROQ_MODEL = raw_model.replace("openai/", "")
-ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token").strip()
+RAW_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Prevent invalid or deprecated model strings from breaking Groq calls
+if "gpt-oss" in RAW_GROQ_MODEL or not RAW_GROQ_MODEL:
+    GROQ_MODEL = "llama-3.3-70b-versatile"
+else:
+    GROQ_MODEL = RAW_GROQ_MODELARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "default_secret_token").strip()
 GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
 DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
 
@@ -311,22 +315,34 @@ def synthesize_business_blueprint(business_name: str, niche: str, location: str,
       ]
     }}
     """
-    try:
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an elite business intelligence synthesizer. Output strictly valid JSON with 6 to 9 detailed items."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=3500,
-            response_format={"type": "json_object"}
-        )
-        return json.loads(resp.choices[0].message.content.strip())
-    except Exception as e:
-        print(f"Blueprint synthesis error: {e}")
-        raise RuntimeError(f"Failed to synthesize business blueprint: {e}")
 
+    models_to_try = [GROQ_MODEL, "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    # Remove duplicates while preserving order
+    unique_models = list(dict.fromkeys(models_to_try))
+
+    last_err = None
+    for model_id in unique_models:
+        try:
+            resp = groq_client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": "You are an elite business intelligence synthesizer. Output strictly valid JSON with 6 to 9 detailed items."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=3500,
+                response_format={"type": "json_object"}
+            )
+            content = resp.choices[0].message.content.strip()
+            if content.startswith("```"):
+                lines = content.splitlines()
+                content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+            return json.loads(content)
+        except Exception as e:
+            print(f"Blueprint synthesis failed with model '{model_id}': {e}")
+            last_err = e
+
+    raise RuntimeError(f"Failed to synthesize business blueprint across all models: {last_err}")
 
 def compile_bespoke_webapp(blueprint: Dict[str, Any]) -> str:
     """
