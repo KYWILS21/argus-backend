@@ -156,84 +156,60 @@ async def cors_preflight_handler(rest_of_path: str):
 async def favicon():
     return Response(status_code=204)
 
-def google_scout_intel(business_name: str, location: str) -> str:
-    """Queries Google to extract real menus, offerings, pricing, and operating details."""
-    queries = [
-        f"{business_name} {location} menu services prices reviews hours",
-        f"{business_name} {location} signature dishes popular items about"
-    ]
-    raw_snippets = []
-    for q in queries:
-        try:
-            clean_q = urllib.parse.quote(q)
-            url = f"https://www.google.com/search?q={clean_q}&num=4&hl=en"
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
-            snippets = re.findall(r'<div[^>]*class="[^"]*BNeawe s3v9rd AP7Wnd[^"]*"[^>]*>(.*?)</div>', html)
-            for s in snippets[:3]:
-                clean = re.sub(r'<[^>]+>', ' ', s).strip()
-                if len(clean) > 25:
-                    raw_snippets.append(clean)
-        except Exception as e:
-            print(f"Scout fetch error for query '{q}': {e}")
-    return "\n".join(raw_snippets) if raw_snippets else f"Authentic local establishment in {location}."
-
-
-def extract_structured_business_profile(business_name: str, location: str, raw_intel: str) -> Dict[str, Any]:
-    """Extracts specific signature dishes or services so ARGUS can search for item-specific photos."""
-    prompt = f"""
-    Analyze "{business_name}" in "{location}" using this search data:
-    {raw_intel[:1500]}
-
-    Extract 3 authentic signature items/dishes/services with realistic numerical prices and rich descriptions.
-    RETURN ONLY A STRICT JSON OBJECT:
-    {{
-      "tagline": "Compelling 10-15 word summary of why locals love this spot",
-      "featured_items": [
-        {{"name": "Cooper Sharp Cheesesteak", "price": 15.50, "category": "steaks", "description": "Thinly sliced ribeye on a fresh seeded roll with melted Cooper Sharp and fried onions."}},
-        {{"name": "Grandma Pan Pizza", "price": 22.00, "category": "pizza", "description": "Crisp square pan crust with crushed San Marzano tomatoes, fresh mozzarella, and basil."}},
-        {{"name": "Chicken Cutlet Italiano", "price": 16.00, "category": "steaks", "description": "Breaded chicken cutlet with sautéed broccoli rabe and sharp provolone on seeded bread."}}
-      ]
-    }}
+def perplexity_deep_research(business_name: str, location: str, niche: str) -> Dict[str, Any]:
     """
-    try:
-        if not groq_client:
-            raise ValueError("Groq client not initialized")
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a data extraction engine. Output strictly valid JSON tailored to the exact business."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"}
-        )
-        return json.loads(resp.choices[0].message.content.strip())
-    except Exception as e:
-        print(f"Profile extraction fallback triggered: {e}")
-        return {
-            "tagline": f"Handcrafted quality, signature favorites, and dedicated service in {location}.",
-            "featured_items": [
-                {"name": "Cooper Sharp Cheesesteak", "price": 15.50, "category": "steaks", "description": "Thinly sliced fresh ribeye on house-baked seeded bread with caramelized onions and melted Cooper Sharp."},
-                {"name": "Grandma Square Pie", "price": 22.00, "category": "pizza", "description": "Crisp square pan pizza topped with crushed plum tomatoes, fresh garlic, basil, and aged mozzarella."},
-                {"name": "Chicken Cutlet Supreme", "price": 16.00, "category": "steaks", "description": "Hand-breaded chicken breast cutlet layered with bitter broccoli rabe and sharp provolone."}
-            ]
-        }
-
-
-def scout_authentic_dish_image(business_name: str, item_name: str, niche: str, fallback_url: str) -> str:
-    """Scrapes close-up food or product photography specifically matching the dish/service name."""
-    queries = [
-        f"{business_name} {item_name} food close up photo",
-        f"{item_name} {niche} appetizing photography"
+    Stage 1: Multi-vector web & image research engine.
+    Executes targeted search vectors to harvest real offerings, pricing, reviews, hours, and photos.
+    """
+    search_vectors = [
+        f"{business_name} {location} full menu services price list offerings",
+        f"{business_name} {location} hours address phone number reviews specialties",
+        f"{business_name} {location} {niche} signature popular items"
     ]
-    bad_tokens = [".svg", "logo", "icon", "favicon", "1x1", "map", "streetview", "building", "exterior"]
     
-    for q in queries:
+    collected_intel = []
+    
+    # 1A. Harvest Deep Web Snippets via DDGS + Google Fallback
+    for query in search_vectors:
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=5))
+                for r in results:
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    if body and len(body) > 30:
+                        collected_intel.append(f"[{title}]: {body}")
+        except Exception as e:
+            print(f"DDGS text vector warning ({query}): {e}")
+            # Fallback to direct Google scrape if DDGS rate-limits
+            try:
+                clean_q = urllib.parse.quote(query)
+                url = f"https://www.google.com/search?q={clean_q}&num=5&hl=en"
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    html = resp.read().decode("utf-8", errors="ignore")
+                snippets = re.findall(r'<div[^>]*class="[^"]*BNeawe s3v9rd AP7Wnd[^"]*"[^>]*>(.*?)</div>', html)
+                for s in snippets[:4]:
+                    clean = re.sub(r'<[^>]+>', ' ', s).strip()
+                    if len(clean) > 30:
+                        collected_intel.append(clean)
+            except Exception as g_err:
+                print(f"Google fallback error: {g_err}")
+
+    raw_corpus = "\n".join(collected_intel) if collected_intel else f"{business_name} is a premier {niche} located in {location}."
+    return {"corpus": raw_corpus}
+
+
+def harvest_targeted_media(business_name: str, location: str, items: List[Dict[str, Any]], hero_query: str) -> Dict[str, Any]:
+    """
+    Stage 2B: Harvests specific visual assets for the Hero and each individual item/service.
+    """
+    bad_tokens = [".svg", "logo", "icon", "favicon", "1x1", "map", "avatar", "badge"]
+    
+    def fetch_single_image(q: str, default_img: str) -> str:
         try:
             with DDGS() as ddgs:
                 results = list(ddgs.images(q, max_results=5))
@@ -242,9 +218,627 @@ def scout_authentic_dish_image(business_name: str, item_name: str, niche: str, f
                     if url.startswith("http") and not any(b in url.lower() for b in bad_tokens):
                         return url
         except Exception as e:
-            print(f"Dish image search error for '{q}': {e}")
+            print(f"Media harvest warning for '{q}': {e}")
+        return default_img
 
-    return fallback_url
+    hero_img = fetch_single_image(
+        f"{business_name} {location} {hero_query} high resolution",
+        "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1600&q=80"
+    )
+
+    enriched_items = []
+    for item in items:
+        item_name = item.get("name", "")
+        img_q = item.get("image_query") or f"{business_name} {item_name} close up photo"
+        item_img = fetch_single_image(
+            img_q,
+            "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80"
+        )
+        item["image_url"] = item_img
+        enriched_items.append(item)
+
+    return {"hero_image": hero_img, "items": enriched_items}
+
+
+def synthesize_business_blueprint(business_name: str, niche: str, location: str, research_corpus: str) -> Dict[str, Any]:
+    """
+    Stage 2A: Perplexity-style Synthesis Engine.
+    Transforms raw web research into a complete brand identity, UX architecture, and full catalog.
+    """
+    prompt = f"""
+    You are an autonomous business intelligence and brand synthesis engine (like Perplexity Pages).
+    Analyze the following live web research for "{business_name}" ({niche}) in "{location}":
+
+    LIVE WEB RESEARCH CORPUS:
+    {research_corpus[:3500]}
+
+    YOUR TASK:
+    Synthesize a complete, authentic digital blueprint for this specific business.
+    1. Determine the exact interaction model:
+       - "cart_order" (for restaurants, bakeries, cafes, retail shops where users add items to a bag)
+       - "service_booking" (for auto repair, barbers, dentists, contractors, law firms, gyms where users select services to book an appointment or request an instant estimate)
+    2. Design a bespoke color palette (exact HEX codes) and typography pairing that matches their real-world vibe (e.g., light, airy & clinical for a dental group; gritty dark slate & safety orange for a tire/mechanic shop; warm cream, espresso & terracotta for a bakery/pizzeria).
+    3. Extract 6 to 9 REAL menu items, products, or service packages from the research (with realistic numeric prices, categories, descriptions, and specific image search queries).
+    4. Extract real store hours, address, phone number, and 3 authentic customer review highlights.
+
+    RETURN ONLY VALID JSON matching this exact structure:
+    {{
+      "business_name": "{business_name}",
+      "niche_subtitle": "Specific descriptive category (e.g. 'South Philly Artisan Pizzeria & Bakery' or 'Center City ASE-Certified Tire & Auto Center')",
+      "interaction_mode": "cart_order" | "service_booking",
+      "hero_headline": "Bold, high-impact headline tailored to the business",
+      "hero_subheadline": "Detailed 15-25 word value proposition grounded in the research",
+      "hero_image_query": "Specific search query for the hero background image",
+      "primary_cta": "e.g., 'Start Pickup Order' or 'Book Service Bay'",
+      "drawer_title": "e.g., 'Your Pickup Order' or 'Service Estimate & Booking'",
+      "checkout_button_text": "e.g., 'Submit Order to Kitchen' or 'Confirm Appointment Request'",
+      "theme": {{
+        "mode": "dark" | "light",
+        "bg_primary": "#HEX (main background)",
+        "bg_secondary": "#HEX (card/section surface)",
+        "text_primary": "#HEX (main text)",
+        "text_secondary": "#HEX (muted text)",
+        "accent_primary": "#HEX (buttons, highlights, badges)",
+        "accent_secondary": "#HEX (hover states/secondary badges)",
+        "heading_font": "Google Font name (e.g., 'Syne', 'Playfair Display', 'Space Grotesk', 'Oswald', 'Plus Jakarta Sans')",
+        "body_font": "Google Font name (e.g., 'Inter', 'DM Sans', 'Work Sans')",
+        "border_radius": "e.g., '0.5rem', '1rem', '0px'"
+      }},
+      "contact_info": {{
+        "address": "Extracted street address or neighborhood in {location}",
+        "phone": "Extracted phone or '(215) 555-0192'",
+        "hours": "Extracted operating hours (e.g., 'Tue-Sun: 11:00 AM - 9:00 PM')",
+        "policy_badge": "Key operational note (e.g., 'Cash Only • Fresh Baked Daily' or 'Same-Day State Inspections • Walk-Ins Welcome')"
+      }},
+      "categories": ["Category 1", "Category 2", "Category 3"],
+      "items": [
+        {{
+          "id": "item-1",
+          "name": "Specific Real Dish / Service Name",
+          "category": "Must match one of the categories above",
+          "price": 16.50,
+          "price_label": "$16.50 (or 'From $89' / 'Free Estimate')",
+          "badge": "Optional tag like 'Best Seller', 'House Special', or 'Most Popular'",
+          "description": "Rich 15-25 word authentic description of ingredients, process, or service scope.",
+          "options": ["Modifier 1", "Modifier 2", "Modifier 3"],
+          "image_query": "Specific close-up photo search query for this exact item/service (NOT the building)"
+        }}
+      ],
+      "reviews": [
+        {{"author": "Local Customer", "rating": "5.0", "text": "Specific praise grounded in what this business is famous for."}},
+        {{"author": "Verified Patron", "rating": "5.0", "text": "Specific praise about a signature item or service quality."}},
+        {{"author": "Neighborhood Regular", "rating": "4.9", "text": "Specific praise about the atmosphere, speed, or craftsmanship."}}
+      ]
+    }}
+    """
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "You are an elite business intelligence synthesizer. Output strictly valid JSON with 6 to 9 detailed items."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=3500,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(resp.choices[0].message.content.strip())
+    except Exception as e:
+        print(f"Blueprint synthesis error: {e}")
+        raise RuntimeError(f"Failed to synthesize business blueprint: {e}")
+
+
+def compile_bespoke_webapp(blueprint: Dict[str, Any]) -> str:
+    """
+    Stage 3: Dynamic Frontend Compiler.
+    Generates a complete, bespoke, multi-section single-page application driven by the blueprint JSON.
+    """
+    theme = blueprint.get("theme", {})
+    contact = blueprint.get("contact_info", {})
+    heading_font = theme.get("heading_font", "Plus Jakarta Sans")
+    body_font = theme.get("body_font", "Inter")
+    font_url = f"https://fonts.googleapis.com/css2?family={heading_font.replace(' ', '+')}:wght@600;700;800&family={body_font.replace(' ', '+')}:wght@400;500;600;700&display=swap"
+
+    blueprint_json_str = json.dumps(blueprint)
+
+    return f"""<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{blueprint.get('business_name')} | {blueprint.get('niche_subtitle')}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="{font_url}" rel="stylesheet">
+  <style>
+    :root {{
+      --bg-primary: {theme.get('bg_primary', '#0c0a09')};
+      --bg-secondary: {theme.get('bg_secondary', '#1c1917')};
+      --text-primary: {theme.get('text_primary', '#fafaf9')};
+      --text-secondary: {theme.get('text_secondary', '#a8a29e')};
+      --accent: {theme.get('accent_primary', '#f59e0b')};
+      --accent-hover: {theme.get('accent_secondary', '#d97706')};
+      --radius: {theme.get('border_radius', '0.75rem')};
+    }}
+    body {{
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: '{body_font}', sans-serif;
+    }}
+    h1, h2, h3, h4, .font-display {{
+      font-family: '{heading_font}', sans-serif;
+    }}
+    .surface-card {{
+      background-color: var(--bg-secondary);
+      border-radius: var(--radius);
+      border: 1px solid rgba(128, 128, 128, 0.18);
+    }}
+    .btn-accent {{
+      background-color: var(--accent);
+      color: #ffffff;
+      border-radius: var(--radius);
+      transition: all 0.2s ease;
+    }}
+    .btn-accent:hover {{
+      background-color: var(--accent-hover);
+      transform: translateY(-1px);
+    }}
+    .text-accent {{
+      color: var(--accent);
+    }}
+    .border-accent {{
+      border-color: var(--accent);
+    }}
+  </style>
+</head>
+<body class="antialiased selection:bg-amber-500 selection:text-black min-h-screen flex flex-col justify-between">
+
+  <!-- Top Operational Banner -->
+  <div class="w-full py-2 px-4 text-center text-xs font-semibold tracking-wide border-b border-white/10" style="background-color: var(--bg-secondary); color: var(--text-secondary);">
+    <span class="text-accent font-bold">● LIVE STATUS:</span> {contact.get('policy_badge', 'Open for Customers')} &nbsp;|&nbsp; 📍 {contact.get('address', '')} &nbsp;|&nbsp; 📞 {contact.get('phone', '')}
+  </div>
+
+  <!-- Sticky Navigation -->
+  <header class="sticky top-0 z-40 backdrop-blur-xl border-b border-white/10" style="background-color: color-mix(in srgb, var(--bg-primary) 88%, transparent);">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+      <div>
+        <a href="#" onclick="switchPage('home')" class="text-2xl font-extrabold tracking-tight font-display" style="color: var(--text-primary);">
+          {blueprint.get('business_name')}
+        </a>
+        <span class="hidden md:inline-block ml-3 text-xs px-2.5 py-1 rounded-full font-medium" style="background-color: var(--bg-secondary); color: var(--text-secondary);">
+          {blueprint.get('niche_subtitle')}
+        </span>
+      </div>
+
+      <nav class="hidden md:flex items-center space-x-8 text-sm font-semibold">
+        <button onclick="switchPage('home')" id="nav-home" class="text-accent border-b-2 border-accent pb-1 transition">Overview & Catalog</button>
+        <button onclick="switchPage('reviews')" id="nav-reviews" class="hover:opacity-80 pb-1 transition" style="color: var(--text-secondary);">Reviews & Story</button>
+        <button onclick="switchPage('location')" id="nav-location" class="hover:opacity-80 pb-1 transition" style="color: var(--text-secondary);">Hours & Location</button>
+      </nav>
+
+      <div class="flex items-center space-x-3">
+        <button onclick="toggleDrawer()" class="btn-accent px-5 py-2.5 text-sm font-bold flex items-center gap-2.5 shadow-lg">
+          <span id="drawer-btn-label">{blueprint.get('primary_cta', 'View Selection')}</span>
+          <span id="cart-count" class="bg-black/30 text-white text-xs px-2 py-0.5 rounded-full font-mono">0</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- VIEW 1: HOME & INTERACTIVE CATALOG -->
+  <main id="page-home" class="flex-grow">
+    <!-- Hero Section -->
+    <section class="relative py-24 md:py-32 px-6 bg-cover bg-center border-b border-white/10" style="background-image: linear-gradient(to bottom, rgba(0,0,0,0.65), rgba(0,0,0,0.85)), url('{blueprint.get('hero_image', '')}');">
+      <div class="max-w-4xl mx-auto text-center space-y-6">
+        <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest bg-white/10 text-white backdrop-blur-md border border-white/20">
+          <span>★ Verified Local Standard</span>
+          <span>•</span>
+          <span>{contact.get('address', '')}</span>
+        </div>
+        <h1 class="text-4xl sm:text-6xl font-extrabold text-white tracking-tight leading-tight font-display">
+          {blueprint.get('hero_headline')}
+        </h1>
+        <p class="text-lg sm:text-xl text-neutral-200 max-w-2xl mx-auto leading-relaxed">
+          {blueprint.get('hero_subheadline')}
+        </p>
+        <div class="pt-4 flex flex-wrap justify-center gap-4">
+          <a href="#catalog-section" class="btn-accent px-8 py-4 font-bold text-base shadow-xl">
+            Explore Full Offerings
+          </a>
+          <button onclick="switchPage('location')" class="bg-white/10 hover:bg-white/20 text-white border border-white/25 px-8 py-4 font-bold text-base backdrop-blur-md transition" style="border-radius: var(--radius);">
+            Hours & Directions
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dynamic Search & Category Filter Bar -->
+    <section id="catalog-section" class="max-w-7xl mx-auto px-6 py-16">
+      <div class="flex flex-col md:flex-row md:items-end justify-between mb-10 gap-6">
+        <div>
+          <span class="text-xs font-bold uppercase tracking-widest text-accent">Complete Live Directory</span>
+          <h2 class="text-3xl sm:text-4xl font-extrabold mt-1 font-display"> Offerings & Pricing</h2>
+        </div>
+        
+        <div class="flex flex-wrap items-center gap-3">
+          <input type="text" id="search-input" oninput="renderCatalog()" placeholder="Search items or services..." class="px-4 py-2 text-sm surface-card focus:outline-none focus:ring-2" style="color: var(--text-primary);" />
+          <div id="category-tabs" class="flex flex-wrap gap-2"></div>
+        </div>
+      </div>
+
+      <!-- Dynamic Item Grid -->
+      <div id="catalog-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"></div>
+    </section>
+  </main>
+
+  <!-- VIEW 2: REVIEWS & BRAND STORY (Multi-Page Tab View) -->
+  <section id="page-reviews" class="hidden max-w-5xl mx-auto px-6 py-20 flex-grow">
+    <div class="text-center mb-14">
+      <span class="text-xs font-bold uppercase tracking-widest text-accent">Community Reputation</span>
+      <h2 class="text-4xl font-extrabold mt-2 font-display">What Locals Are Saying</h2>
+      <p class="mt-2 text-sm" style="color: var(--text-secondary);">Verified customer experiences and neighborhood feedback for {blueprint.get('business_name')}.</p>
+    </div>
+    <div id="reviews-grid" class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16"></div>
+    <div class="surface-card p-8 text-center space-y-4">
+      <h3 class="text-2xl font-bold font-display">Ready to Experience {blueprint.get('business_name')}?</h3>
+      <p class="text-sm max-w-xl mx-auto" style="color: var(--text-secondary);">{blueprint.get('hero_subheadline')}</p>
+      <button onclick="switchPage('home')" class="btn-accent px-6 py-3 text-sm font-bold">Return to Offerings</button>
+    </div>
+  </section>
+
+  <!-- VIEW 3: HOURS, LOCATION & DIRECT CONTACT (Multi-Page Tab View) -->
+  <section id="page-location" class="hidden max-w-5xl mx-auto px-6 py-20 flex-grow">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+      <div class="surface-card p-8 space-y-6">
+        <span class="text-xs font-bold uppercase tracking-widest text-accent">Visit or Call Direct</span>
+        <h2 class="text-3xl font-extrabold font-display">{blueprint.get('business_name')}</h2>
+        <div class="space-y-4 text-sm">
+          <div>
+            <div class="font-bold opacity-70 uppercase text-xs">Location / Address</div>
+            <div class="text-base font-semibold mt-1">{contact.get('address', '')}</div>
+          </div>
+          <div>
+            <div class="font-bold opacity-70 uppercase text-xs">Direct Phone</div>
+            <a href="tel:{contact.get('phone', '')}" class="text-base font-bold text-accent hover:underline mt-1 block">{contact.get('phone', '')}</a>
+          </div>
+          <div>
+            <div class="font-bold opacity-70 uppercase text-xs">Operating Hours</div>
+            <div class="text-base mt-1">{contact.get('hours', '')}</div>
+          </div>
+          <div class="pt-4 border-t border-white/10">
+            <span class="inline-block px-3 py-1 rounded text-xs font-bold" style="background-color: var(--bg-primary); color: var(--accent);">
+              {contact.get('policy_badge', '')}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Direct Inquiry / Callback Form -->
+      <div class="surface-card p-8 space-y-5">
+        <h3 class="text-2xl font-bold font-display">Send a Direct Inquiry</h3>
+        <p class="text-xs" style="color: var(--text-secondary);">Have a special request, catering question, or custom service inquiry? Reach out directly.</p>
+        <form onsubmit="submitInquiry(event)" class="space-y-4 text-sm">
+          <input type="text" required placeholder="Your Name" class="w-full p-3 rounded bg-black/20 border border-white/15 focus:outline-none" style="color: var(--text-primary);">
+          <input type="tel" required placeholder="Phone Number" class="w-full p-3 rounded bg-black/20 border border-white/15 focus:outline-none" style="color: var(--text-primary);">
+          <textarea rows="3" required placeholder="How can we help you?" class="w-full p-3 rounded bg-black/20 border border-white/15 focus:outline-none" style="color: var(--text-primary);"></textarea>
+          <button type="submit" class="w-full btn-accent py-3 font-bold text-sm">Send Message</button>
+        </form>
+        <div id="inquiry-toast" class="hidden p-3 rounded text-xs font-bold bg-emerald-500/20 text-emerald-300 text-center">
+          ✓ Inquiry received! Our team will contact you shortly.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ITEM CUSTOMIZER / SERVICE OPTIONS MODAL -->
+  <div id="item-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+    <div class="surface-card max-w-md w-full p-6 space-y-5 shadow-2xl">
+      <div class="flex justify-between items-start">
+        <div>
+          <h3 id="modal-item-name" class="text-xl font-bold font-display"></h3>
+          <p id="modal-item-price" class="text-sm font-bold text-accent mt-0.5"></p>
+        </div>
+        <button onclick="closeItemModal()" class="text-sm opacity-60 hover:opacity-100">✕</button>
+      </div>
+      <p id="modal-item-desc" class="text-xs leading-relaxed" style="color: var(--text-secondary);"></p>
+      
+      <div id="modal-options-container" class="space-y-2 pt-2">
+        <label class="text-xs font-bold uppercase tracking-wider opacity-75">Select Preferences / Modifiers:</label>
+        <div id="modal-options-list" class="space-y-2 text-sm"></div>
+      </div>
+
+      <div>
+        <label class="text-xs font-bold uppercase tracking-wider opacity-75">Special Notes / Requests:</label>
+        <input id="modal-custom-note" type="text" placeholder="Optional instructions..." class="w-full mt-1 p-2.5 text-xs rounded bg-black/20 border border-white/15" style="color: var(--text-primary);" />
+      </div>
+
+      <button id="modal-confirm-btn" class="w-full btn-accent py-3 font-bold text-sm">Add to Selection</button>
+    </div>
+  </div>
+
+  <!-- SLIDE-OVER INTERACTIVE DRAWER (CART OR BOOKING ESTIMATE) -->
+  <div id="side-drawer" class="fixed inset-0 z-50 pointer-events-none opacity-0 transition-opacity duration-300">
+    <div onclick="toggleDrawer()" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+    <div id="drawer-panel" class="absolute right-0 top-0 h-full w-full max-w-md p-6 flex flex-col justify-between pointer-events-auto transform translate-x-full transition-transform duration-300 shadow-2xl" style="background-color: var(--bg-secondary);">
+      <div>
+        <div class="flex justify-between items-center pb-4 border-b border-white/10">
+          <h2 class="text-xl font-extrabold font-display">{blueprint.get('drawer_title', 'Your Selection')}</h2>
+          <button onclick="toggleDrawer()" class="text-sm opacity-70 hover:opacity-100">✕ Close</button>
+        </div>
+        <div id="drawer-items" class="py-5 space-y-3 overflow-y-auto max-h-[55vh]"></div>
+      </div>
+
+      <div class="pt-4 border-t border-white/10 space-y-4">
+        <div class="space-y-2 text-xs">
+          <input id="customer-name" type="text" placeholder="Your Full Name *" class="w-full p-2.5 rounded bg-black/20 border border-white/15" style="color: var(--text-primary);">
+          <input id="customer-phone" type="tel" placeholder="Mobile Phone for Updates *" class="w-full p-2.5 rounded bg-black/20 border border-white/15" style="color: var(--text-primary);">
+          <input id="customer-time" type="text" placeholder="Preferred Pickup / Appointment Time" class="w-full p-2.5 rounded bg-black/20 border border-white/15" style="color: var(--text-primary);">
+        </div>
+        <div class="flex justify-between items-baseline text-base font-bold pt-2">
+          <span>Estimated Total</span>
+          <span id="drawer-total" class="text-xl text-accent font-mono">$0.00</span>
+        </div>
+        <button onclick="completeCheckout()" class="w-full btn-accent py-3.5 font-extrabold text-sm shadow-lg">
+          {blueprint.get('checkout_button_text', 'Confirm & Submit')}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONFIRMATION RECEIPT MODAL -->
+  <div id="receipt-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+    <div class="surface-card max-w-sm w-full p-6 text-center space-y-4 shadow-2xl">
+      <div class="w-12 h-12 rounded-full flex items-center justify-center mx-auto text-xl font-bold btn-accent">✓</div>
+      <h3 class="text-2xl font-extrabold font-display">Confirmed!</h3>
+      <p id="receipt-summary" class="text-xs leading-relaxed" style="color: var(--text-secondary);"></p>
+      <div id="receipt-box" class="p-4 rounded text-xs font-mono text-left space-y-1 bg-black/30 border border-white/10"></div>
+      <button onclick="closeReceipt()" class="w-full btn-accent py-2.5 font-bold text-xs">Done</button>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer class="border-t border-white/10 py-10 px-6 text-center text-xs mt-16" style="background-color: var(--bg-secondary); color: var(--text-secondary);">
+    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
+      <div class="font-bold" style="color: var(--text-primary);">&copy; 2026 {blueprint.get('business_name')}. All rights reserved.</div>
+      <div>📍 {contact.get('address', '')} &bull; 📞 {contact.get('phone', '')}</div>
+    </div>
+  </footer>
+
+  <!-- Client-Side Application Engine -->
+  <script>
+    const BLUEPRINT = {blueprint_json_str};
+    let activeCategory = 'All';
+    let cart = [];
+    let currentModalItem = null;
+
+    function initApp() {{
+      renderCategories();
+      renderCatalog();
+      renderReviews();
+      renderDrawer();
+    }}
+
+    function switchPage(pageId) {{
+      ['home', 'reviews', 'location'].forEach(p => {{
+        document.getElementById('page-' + p).classList.add('hidden');
+        const navBtn = document.getElementById('nav-' + p);
+        if (navBtn) {{
+          navBtn.className = "hover:opacity-80 pb-1 transition";
+          navBtn.style.color = "var(--text-secondary)";
+        }}
+      }});
+      document.getElementById('page-' + pageId).classList.remove('hidden');
+      const activeNav = document.getElementById('nav-' + pageId);
+      if (activeNav) {{
+        activeNav.className = "text-accent border-b-2 border-accent pb-1 transition";
+        activeNav.style.color = "var(--accent)";
+      }}
+      window.scrollTo({{ top: 0, behavior: 'smooth' }});
+    }}
+
+    function renderCategories() {{
+      const cats = ['All', ...(BLUEPRINT.categories || [])];
+      const container = document.getElementById('category-tabs');
+      container.innerHTML = cats.map(c => `
+        <button onclick="setCategory('${{c.replace(/'/g, "\\'")}}')" class="px-4 py-2 text-xs font-bold transition ${{activeCategory === c ? 'btn-accent' : 'surface-card hover:opacity-80'}}">
+          ${{c}}
+        </button>
+      `).join('');
+    }}
+
+    function setCategory(cat) {{
+      activeCategory = cat;
+      renderCategories();
+      renderCatalog();
+    }}
+
+    function renderCatalog() {{
+      const query = (document.getElementById('search-input').value || '').toLowerCase();
+      const grid = document.getElementById('catalog-grid');
+      const items = (BLUEPRINT.items || []).filter(item => {{
+        const matchesCat = activeCategory === 'All' || item.category === activeCategory;
+        const matchesQuery = item.name.toLowerCase().includes(query) || (item.description || '').toLowerCase().includes(query);
+        return matchesCat && matchesQuery;
+      }});
+
+      const actionLabel = BLUEPRINT.interaction_mode === 'service_booking' ? 'Select Service' : 'Add to Order';
+
+      grid.innerHTML = items.map((item, idx) => `
+        <div class="surface-card overflow-hidden flex flex-col justify-between group hover:border-white/30 transition shadow-md">
+          <div>
+            <div class="relative h-56 overflow-hidden bg-black/20">
+              <img src="${{item.image_url}}" alt="${{item.name}}" class="w-full h-full object-cover group-hover:scale-105 transition duration-500" onerror="this.src='https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80'">
+              ${{item.badge ? `<span class="absolute top-3 left-3 px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wider btn-accent shadow">${{item.badge}}</span>` : ''}}
+            </div>
+            <div class="p-6">
+              <div class="flex justify-between items-baseline gap-2 mb-2">
+                <h3 class="text-lg font-bold font-display leading-snug">${{item.name}}</h3>
+                <span class="text-sm font-extrabold text-accent shrink-0">${{item.price_label || ('$' + Number(item.price).toFixed(2))}}</span>
+              </div>
+              <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">${{item.description}}</p>
+            </div>
+          </div>
+          <div class="px-6 pb-6 pt-2">
+            <button onclick="openItemModal(${{idx}})" class="w-full py-2.5 text-xs font-bold btn-accent">
+              ${{actionLabel}}
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }}
+
+    function openItemModal(index) {{
+      const item = BLUEPRINT.items[index];
+      currentModalItem = item;
+      document.getElementById('modal-item-name').innerText = item.name;
+      document.getElementById('modal-item-price').innerText = item.price_label || ('$' + Number(item.price).toFixed(2));
+      document.getElementById('modal-item-desc').innerText = item.description;
+      document.getElementById('modal-custom-note').value = '';
+
+      const optsList = document.getElementById('modal-options-list');
+      const opts = item.options || [];
+      if (opts.length > 0) {{
+        document.getElementById('modal-options-container').classList.remove('hidden');
+        optsList.innerHTML = opts.map((opt, i) => `
+          <label class="flex items-center space-x-2 cursor-pointer">
+            <input type="checkbox" value="${{opt}}" class="modal-opt-check rounded">
+            <span class="text-xs">${{opt}}</span>
+          </label>
+        `).join('');
+      }} else {{
+        document.getElementById('modal-options-container').classList.add('hidden');
+      }}
+
+      const confirmBtn = document.getElementById('modal-confirm-btn');
+      confirmBtn.onclick = () => confirmModalAdd();
+
+      const modal = document.getElementById('item-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }}
+
+    function closeItemModal() {{
+      const modal = document.getElementById('item-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }}
+
+    function confirmModalAdd() {{
+      if (!currentModalItem) return;
+      const checked = Array.from(document.querySelectorAll('.modal-opt-check:checked')).map(el => el.value);
+      const note = document.getElementById('modal-custom-note').value.trim();
+      const modifiers = [...checked, ...(note ? [note] : [])].join(', ');
+
+      cart.push({{
+        name: currentModalItem.name,
+        price: Number(currentModalItem.price) || 0,
+        modifiers: modifiers,
+        qty: 1
+      }});
+
+      closeItemModal();
+      renderDrawer();
+      toggleDrawer(true);
+    }}
+
+    function toggleDrawer(forceOpen = null) {{
+      const drawer = document.getElementById('side-drawer');
+      const panel = document.getElementById('drawer-panel');
+      const isOpen = !drawer.classList.contains('opacity-0');
+      const shouldOpen = forceOpen !== null ? forceOpen : !isOpen;
+
+      if (shouldOpen) {{
+        drawer.classList.remove('opacity-0', 'pointer-events-none');
+        panel.classList.remove('translate-x-full');
+      }} else {{
+        drawer.classList.add('opacity-0', 'pointer-events-none');
+        panel.classList.add('translate-x-full');
+      }}
+    }}
+
+    function removeCartItem(idx) {{
+      cart.splice(idx, 1);
+      renderDrawer();
+    }}
+
+    function renderDrawer() {{
+      const container = document.getElementById('drawer-items');
+      const countEl = document.getElementById('cart-count');
+      const totalEl = document.getElementById('drawer-total');
+
+      countEl.innerText = cart.length;
+      const total = cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
+      totalEl.innerText = '$' + total.toFixed(2);
+
+      if (cart.length === 0) {{
+        container.innerHTML = `<p class="text-xs text-center py-10 opacity-60">Nothing selected yet. Choose an item or service from the catalog.</p>`;
+        return;
+      }}
+
+      container.innerHTML = cart.map((item, idx) => `
+        <div class="p-3.5 rounded bg-black/20 border border-white/10 flex justify-between items-start gap-3">
+          <div>
+            <div class="text-sm font-bold">${{item.name}}</div>
+            ${{item.modifiers ? `<div class="text-[11px] opacity-75 mt-0.5">${{item.modifiers}}</div>` : ''}}
+            <div class="text-xs font-mono text-accent mt-1">$${{item.price.toFixed(2)}}</div>
+          </div>
+          <button onclick="removeCartItem(${{idx}})" class="text-xs opacity-50 hover:opacity-100">✕</button>
+        </div>
+      `).join('');
+    }}
+
+    function completeCheckout() {{
+      if (cart.length === 0) return;
+      const name = document.getElementById('customer-name').value.trim() || 'Valued Customer';
+      const phone = document.getElementById('customer-phone').value.trim() || 'Provided at counter';
+      const time = document.getElementById('customer-time').value.trim() || 'Standard Priority';
+      const total = cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
+
+      toggleDrawer(false);
+      document.getElementById('receipt-summary').innerText = `Thank you, ${{name}}! Your request has been registered with ${{BLUEPRINT.business_name}}.`;
+      document.getElementById('receipt-box').innerHTML = `
+        <div><strong>Reference:</strong> #ARG-${{Math.floor(1000 + Math.random() * 9000)}}</div>
+        <div><strong>Customer:</strong> ${{name}} (${{phone}})</div>
+        <div><strong>Requested Time:</strong> ${{time}}</div>
+        <div><strong>Items Selected:</strong> ${{cart.length}}</div>
+        <div><strong>Total Estimate:</strong> $${{total.toFixed(2)}}</div>
+      `;
+      const modal = document.getElementById('receipt-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }}
+
+    function closeReceipt() {{
+      const modal = document.getElementById('receipt-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      cart = [];
+      renderDrawer();
+    }}
+
+    function renderReviews() {{
+      const grid = document.getElementById('reviews-grid');
+      const reviews = BLUEPRINT.reviews || [];
+      grid.innerHTML = reviews.map(r => `
+        <div class="surface-card p-6 space-y-3">
+          <div class="text-accent text-sm font-bold">★★★★★ ${{r.rating || '5.0'}}</div>
+          <p class="text-xs italic leading-relaxed" style="color: var(--text-secondary);">"${{r.text}}"</p>
+          <div class="text-xs font-bold pt-2">— ${{r.author}}</div>
+        </div>
+      `).join('');
+    }}
+
+    function submitInquiry(e) {{
+      e.preventDefault();
+      document.getElementById('inquiry-toast').classList.remove('hidden');
+      e.target.reset();
+    }}
+
+    window.addEventListener('DOMContentLoaded', initApp);
+  </script>
+</body>
+</html>"""
 
 
 def generate_client_website_tool(
@@ -254,263 +848,48 @@ def generate_client_website_tool(
     contact_phone: Optional[str] = None, 
     highlights: Optional[str] = None
 ) -> str:
-    # 1. Sanitize business name and URL slug
+    # 1. Clean business name & generate clean URL slug
     clean_biz_name = re.split(r'\s+(?:and\s+just|and\s+make|with|featuring)\b', business_name, flags=re.IGNORECASE)[0].strip()
     slug = "".join(c for c in clean_biz_name.lower() if c.isalnum() or c == "-").strip("-")
     if not slug:
         slug = f"demo-{int(time.time())}"
 
-    # 2. Scout business intel & extract specific menu/service items
-    print(f"ARGUS Scouting live intel for '{clean_biz_name}' in '{location}'...")
-    scouted_intel = google_scout_intel(clean_biz_name, location)
-    profile = extract_structured_business_profile(clean_biz_name, location, scouted_intel)
-    
-    tagline = profile.get("tagline", f"Authentic local standard in {location}.")
-    featured_items = profile.get("featured_items", [])[:3]
+    # 2. Stage 1: Multi-Vector Perplexity-style Deep Research
+    print(f"[ARGUS Engine] Stage 1: Deep web research for '{clean_biz_name}' in '{location}'...")
+    research = perplexity_deep_research(clean_biz_name, location, niche)
 
-    # Ensure 3 items exist
-    default_items = [
-        {"name": "Cooper Sharp Cheesesteak", "price": 15.50, "category": "steaks", "description": "Thinly sliced ribeye on seeded bread with melted Cooper Sharp."},
-        {"name": "Grandma Pan Pizza", "price": 22.00, "category": "pizza", "description": "Crisp square crust with crushed San Marzano tomatoes and fresh basil."},
-        {"name": "Chicken Cutlet Supreme", "price": 16.00, "category": "steaks", "description": "Breaded chicken cutlet with broccoli rabe and sharp provolone."}
-    ]
-    while len(featured_items) < 3:
-        featured_items.append(default_items[len(featured_items)])
+    # 3. Stage 2A: Synthesize Full Business Blueprint & Theme Architecture
+    print(f"[ARGUS Engine] Stage 2A: Synthesizing brand palette, UX mode, and full catalog...")
+    blueprint = synthesize_business_blueprint(clean_biz_name, niche, location, research["corpus"])
 
-    # 3. Harvest close-up dish/item photography for each specific item
-    fallbacks = [
-        "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=80",
-        "https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=800&q=80",
-        "https://images.unsplash.com/photo-1509722747041-616f39b57569?auto=format&fit=crop&w=800&q=80"
-    ]
+    # 4. Stage 2B: Harvest Targeted Item-Level Photography
+    print(f"[ARGUS Engine] Stage 2B: Harvesting item-level photography...")
+    media = harvest_targeted_media(
+        clean_biz_name,
+        location,
+        blueprint.get("items", []),
+        blueprint.get("hero_image_query", niche)
+    )
+    blueprint["hero_image"] = media["hero_image"]
+    blueprint["items"] = media["items"]
 
-    hero_photo = scout_authentic_dish_image(clean_biz_name, f"{featured_items[0]['name']} {featured_items[1]['name']}", niche, fallbacks[0])
-    
-    dish_photos = []
-    for idx, item in enumerate(featured_items):
-        item_name = item.get("name", "specialty dish")
-        print(f"ARGUS Harvesting close-up photo for: {item_name}...")
-        photo_url = scout_authentic_dish_image(clean_biz_name, item_name, niche, fallbacks[(idx + 1) % len(fallbacks)])
-        dish_photos.append(photo_url)
-
-    # 4. Build interactive menu cards HTML with item-specific photos
-    cards_html = ""
-    for idx, item in enumerate(featured_items):
-        name = item.get("name", "Specialty Item")
-        raw_price = item.get("price", 15.00)
-        try:
-            price_num = float(str(raw_price).replace("$", "").strip())
-        except ValueError:
-            price_num = 15.00
-        cat = item.get("category", "all")
-        desc = item.get("description", "Prepared fresh daily.")
-        img_src = dish_photos[idx]
-        safe_name = name.replace("'", "\\'")
-
-        cards_html += f"""
-      <div class="menu-item bg-stone-900 border border-stone-800 rounded-2xl overflow-hidden flex flex-col justify-between hover:border-amber-500/50 transition" data-category="{cat}">
-        <img src="{img_src}" class="w-full h-56 object-cover" alt="{name}" onerror="this.src='{fallbacks[(idx + 1) % len(fallbacks)]}'">
-        <div class="p-6">
-          <div class="flex justify-between items-baseline mb-2">
-            <h3 class="text-lg font-bold text-white">{name}</h3>
-            <span class="text-amber-400 font-extrabold">${price_num:.2f}</span>
-          </div>
-          <p class="text-stone-400 text-xs leading-relaxed mb-6">{desc}</p>
-          <button onclick="addToCart('{safe_name}', {price_num:.2f})" class="w-full bg-stone-800 hover:bg-amber-500 hover:text-stone-950 text-stone-200 font-bold py-2.5 rounded-xl text-xs transition">Add to Bag</button>
-        </div>
-      </div>"""
-
-    # 5. Assemble Full Interactive Application
-    raw_html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{clean_biz_name} | {location}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-stone-950 text-stone-100 font-sans antialiased selection:bg-amber-500 selection:text-stone-950 pb-20">
-
-  <!-- Sticky Header -->
-  <header class="bg-stone-900/90 backdrop-blur-md border-b border-stone-800 sticky top-0 z-40">
-    <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
-      <div class="flex items-center space-x-3">
-        <span class="text-xl font-black tracking-wider uppercase text-amber-500">{clean_biz_name}</span>
-        <span class="hidden sm:inline-block text-xs bg-stone-800 text-stone-400 px-2.5 py-1 rounded-md">{location}</span>
-      </div>
-      <div class="flex items-center space-x-4">
-        <button onclick="toggleCart()" class="relative bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition shadow-md">
-          <span>Your Bag</span>
-          <span id="cart-badge" class="bg-stone-950 text-amber-400 text-xs px-2 py-0.5 rounded-full font-black">0</span>
-        </button>
-      </div>
-    </div>
-  </header>
-
-  <!-- Hero Section -->
-  <section class="relative py-28 px-6 text-center bg-cover bg-center" style="background-image: linear-gradient(rgba(12,10,9,0.78), rgba(12,10,9,0.88)), url('{hero_photo}');">
-    <div class="max-w-3xl mx-auto space-y-6">
-      <span class="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 uppercase tracking-widest text-xs font-bold px-3 py-1.5 rounded-full">{niche} &bull; {location}</span>
-      <h1 class="text-4xl sm:text-6xl font-black tracking-tight text-white">{clean_biz_name}</h1>
-      <p class="text-lg text-stone-300 max-w-xl mx-auto leading-relaxed">{tagline}</p>
-      <div class="pt-2 flex justify-center gap-4">
-        <a href="#menu" class="bg-amber-500 hover:bg-amber-600 text-stone-950 px-6 py-3 rounded-xl font-bold shadow-lg transition">Explore Menu & Order</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- Interactive Menu & Category Filter -->
-  <section id="menu" class="max-w-6xl mx-auto px-6 pt-16">
-    <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
-      <div>
-        <h2 class="text-3xl font-black text-white">Signature Lineup</h2>
-        <p class="text-stone-400 text-sm mt-1">Select any item below to customize and add to your pickup bag.</p>
-      </div>
-      <div class="flex gap-2 bg-stone-900 p-1.5 rounded-xl border border-stone-800">
-        <button onclick="filterCategory('all')" id="tab-all" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition">All Items</button>
-        <button onclick="filterCategory('pizza')" id="tab-pizza" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Pies</button>
-        <button onclick="filterCategory('steaks')" id="tab-steaks" class="cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition">Steaks & Cutlets</button>
-      </div>
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-      {cards_html}
-    </div>
-  </section>
-
-  <!-- Interactive Slide-Over Cart Drawer -->
-  <div id="cart-drawer" class="fixed inset-0 z-50 pointer-events-none transition-opacity duration-300 opacity-0">
-    <div onclick="toggleCart()" class="absolute inset-0 bg-stone-950/70 backdrop-blur-sm"></div>
-    <div class="absolute right-0 top-0 h-full w-full max-w-md bg-stone-900 border-l border-stone-800 p-6 flex flex-col justify-between pointer-events-auto transform transition-transform duration-300 translate-x-full" id="cart-panel">
-      <div>
-        <div class="flex justify-between items-center pb-4 border-b border-stone-800">
-          <h2 class="text-xl font-bold text-white">Your Pickup Bag</h2>
-          <button onclick="toggleCart()" class="text-stone-400 hover:text-white text-sm">✕ Close</button>
-        </div>
-        <div id="cart-items" class="py-4 space-y-3 overflow-y-auto max-h-[60vh]">
-          <p class="text-stone-500 text-sm text-center py-8">Your bag is empty. Add a dish from the menu!</p>
-        </div>
-      </div>
-      <div class="pt-4 border-t border-stone-800 space-y-4">
-        <div class="flex justify-between text-stone-300 text-sm">
-          <span>Subtotal</span>
-          <span id="cart-subtotal" class="font-bold text-white">$0.00</span>
-        </div>
-        <button onclick="triggerCheckout()" class="w-full bg-amber-500 hover:bg-amber-600 text-stone-950 font-black py-3 rounded-xl text-sm transition">Place Pickup Order</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Mock Order Confirmation Modal -->
-  <div id="checkout-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/80 backdrop-blur-sm hidden">
-    <div class="bg-stone-900 border border-stone-800 rounded-2xl max-w-sm w-full p-6 text-center space-y-4">
-      <div class="w-12 h-12 bg-amber-500/20 text-amber-400 rounded-full flex items-center justify-center mx-auto text-xl font-bold">✓</div>
-      <h3 class="text-xl font-bold text-white">Order Sent to Kitchen</h3>
-      <p class="text-xs text-stone-400">Interactive ordering prototype powered autonomously by ARGUS.</p>
-      <div class="bg-stone-950 p-3 rounded-xl text-xs text-stone-300 text-left font-mono">
-        <div>Estimated Prep: 20-25 Mins</div>
-        <div>Ticket: #AG-8821</div>
-      </div>
-      <button onclick="closeCheckout()" class="w-full bg-stone-800 hover:bg-stone-700 text-white font-bold py-2 rounded-xl text-xs">Return to Menu</button>
-    </div>
-  </div>
-
-  <script>
-    let cart = [];
-
-    function toggleCart() {{
-      const drawer = document.getElementById('cart-drawer');
-      const panel = document.getElementById('cart-panel');
-      const isOpen = !drawer.classList.contains('opacity-0');
-      if (isOpen) {{
-        drawer.classList.add('opacity-0', 'pointer-events-none');
-        panel.classList.add('translate-x-full');
-      }} else {{
-        drawer.classList.remove('opacity-0', 'pointer-events-none');
-        panel.classList.remove('translate-x-full');
-      }}
-    }}
-
-    function addToCart(name, price) {{
-      const existing = cart.find(i => i.name === name);
-      if (existing) {{
-        existing.qty += 1;
-      }} else {{
-        cart.push({{ name, price, qty: 1 }});
-      }}
-      renderCart();
-      toggleCart();
-    }}
-
-    function renderCart() {{
-      const container = document.getElementById('cart-items');
-      const badge = document.getElementById('cart-badge');
-      const subtotalEl = document.getElementById('cart-subtotal');
-
-      const totalQty = cart.reduce((sum, i) => sum + i.qty, 0);
-      const subtotal = cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-
-      badge.innerText = totalQty;
-      subtotalEl.innerText = '$' + subtotal.toFixed(2);
-
-      if (cart.length === 0) {{
-        container.innerHTML = '<p class="text-stone-500 text-sm text-center py-8">Your bag is empty.</p>';
-        return;
-      }}
-
-      container.innerHTML = cart.map(item => `
-        <div class="flex justify-between items-center bg-stone-950 p-3 rounded-xl border border-stone-800">
-          <div>
-            <div class="text-sm font-bold text-white">${{item.name}}</div>
-            <div class="text-xs text-amber-400 font-mono">$${{item.price.toFixed(2)}} each</div>
-          </div>
-          <span class="text-xs font-bold bg-stone-800 px-2.5 py-1 rounded text-stone-300">x${{item.qty}}</span>
-        </div>
-      `).join('');
-    }}
-
-    function filterCategory(cat) {{
-      const items = document.querySelectorAll('.menu-item');
-      const btns = document.querySelectorAll('.cat-btn');
-      btns.forEach(b => b.className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold text-stone-400 hover:text-white transition");
-      const activeBtn = document.getElementById('tab-' + cat);
-      if (activeBtn) activeBtn.className = "cat-btn px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-stone-950 transition";
-
-      items.forEach(el => {{
-        if (cat === 'all' || el.getAttribute('data-category') === cat) {{
-          el.classList.remove('hidden');
-        }} else {{
-          el.classList.add('hidden');
-        }}
-      }});
-    }}
-
-    function triggerCheckout() {{
-      if (cart.length === 0) return;
-      toggleCart();
-      document.getElementById('checkout-modal').classList.remove('hidden');
-    }}
-
-    function closeCheckout() {{
-      document.getElementById('checkout-modal').classList.add('hidden');
-      cart = [];
-      renderCart();
-    }}
-  </script>
-</body>
-</html>"""
+    # 5. Stage 3: Compile Bespoke Multi-View Web Application
+    print(f"[ARGUS Engine] Stage 3: Compiling bespoke interactive web application...")
+    raw_html = compile_bespoke_webapp(blueprint)
 
     file_path = os.path.join(DEMO_DIR, f"{slug}.html")
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(raw_html)
 
     preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
+    mode_label = "Interactive Service Booking & Estimator" if blueprint.get("interaction_mode") == "service_booking" else "Interactive Live Ordering & Modifier Cart"
     return (
-        f"### Website Generated for {clean_biz_name}\n"
-        f"- **Live Preview Link:** [{preview_url}]({preview_url})\n"
-        f"- **Assets:** Targeted close-up food photography & interactive ordering drawer enabled.\n"
-        f"- **File:** `generated_demos/{slug}.html`"
+        f"### Bespoke Web Application Deployed for {clean_biz_name}\n"
+        f"- **Live URL:** [{preview_url}]({preview_url})\n"
+        f"- **UX Engine Mode:** `{mode_label}`\n"
+        f"- **Catalog Populated:** `{len(blueprint.get('items', []))} authentic offerings` with modifier modals & live search\n"
+        f"- **Multi-View Pages:** Overview & Catalog, Customer Reviews, and Direct Location/Inquiry Portal\n"
+        f"- **Typography & Theme:** `{blueprint.get('theme', {}).get('heading_font')}` paired with custom brand hex variables"
     )
 
 def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
