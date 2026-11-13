@@ -1,132 +1,1850 @@
+﻿#!/usr/bin/env python3
+"""
+=========================================================================================
+ARGUS OS v4.0 â€” AUTONOMOUS JARVIS-CLASS EXECUTIVE AI & CREATIVE SYNTHESIS ENGINE
+=========================================================================================
+Architecture:
+  1. Multi-Model Dynamic Router (Groq LPU Inference with automatic model discovery/failover)
+  2. 8-Table Persistent SQLite Knowledge Graph, Task Queue & Episodic Memory
+  3. Executive Productivity Suite:
+     - Google Calendar Engine (OAuth2 / Service Account / iCal + Local SQLite Fallback)
+     - Gmail Communications Engine (IMAP / SMTP + Google API Integration)
+     - Canvas LMS Academic & Project Tracker (Courses, Assignments, Deadlines, Grades)
+     - Autonomous Executive Briefing Generator (Weather, Schedule, Inbox, Canvas, Tasks)
+  4. Perplexity-Grade Multi-Hop Web & Media Research Engine (Jina Reader + DDGS + Bing Proxy)
+  5. Human-in-the-Loop (HITL) Creative Approval Gate & Zero-Template Web/Code Compiler
+  6. Self-Healing Live HTML/Code Editor & Full FastAPI REST/Command Server
+=========================================================================================
+"""
+
 import os
-import re
 import sys
+import re
 import json
 import time
-import base64
+import uuid
+import math
+import shutil
 import sqlite3
+import smtplib
+import imaplib
+import email
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import datetime
-import urllib.request
+import traceback
 import urllib.parse
-import urllib.error
-import asyncio
-from email.message import EmailMessage
-from typing import Optional, List, Dict, Any
-from contextlib import asynccontextmanager
+import urllib.request
+from typing import Dict, Any, List, Optional, Tuple, Union
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Header, UploadFile, File, Response
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, Query, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from groq import Groq, RateLimitError
-from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 try:
-    from ddgs import DDGS
+    from dotenv import load_dotenv
+    load_dotenv()
 except ImportError:
-    from duckduckgo_search import DDGS
+    pass
 
 try:
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    GOOGLE_APIS_AVAILABLE = True
+    from groq import Groq
 except ImportError:
-    GOOGLE_APIS_AVAILABLE = False
+    Groq = None
+
+try:
+    from duckduckgo_search import DDGS # type: ignore
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
 
 
+# =========================================================================================
+# SECTION 1: GLOBAL CONFIGURATION, ENVIRONMENT & DIRECTORY INITIALIZATION
+# =========================================================================================
 
-# ==============================================================================
-# Configuration & Initialization
-# ==============================================================================
+APP_VERSION = "4.0.0-JARVIS"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEMO_DIR = os.path.join(BASE_DIR, "generated_demos")
+WORKSPACE_DIR = os.path.join(BASE_DIR, "argus_workspace")
+DB_PATH = os.path.join(BASE_DIR, os.getenv("ARGUS_DB_PATH", "argus_memory.db"))
 
-# --- CORE CONFIGURATION & GLOBALS ---
+os.makedirs(DEMO_DIR, exist_ok=True)
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
+
 ARGUS_BEARER_TOKEN = os.getenv("ARGUS_BEARER_TOKEN", "argus-secret-key-2026")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://argus-backend-ojna.onrender.com").rstrip("/")
 
+# Groq Configuration
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 RAW_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-if "gpt-oss" in RAW_GROQ_MODEL or not RAW_GROQ_MODEL:
+if "gpt-oss" in RAW_GROQ_MODEL or "llama-3.1-8b" in RAW_GROQ_MODEL or not RAW_GROQ_MODEL:
     GROQ_MODEL = "llama-3.3-70b-versatile"
 else:
     GROQ_MODEL = RAW_GROQ_MODEL
 
-DEMO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_demos")
-os.makedirs(DEMO_DIR, exist_ok=True)
-GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")
-DATABASE_URL = os.getenv("ARGUS_DB_PATH") or os.getenv("DATABASE_URL") or "argus.db"
+groq_client = Groq(api_key=GROQ_API_KEY) if (Groq and GROQ_API_KEY) else None
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
-GITHUB_DEFAULT_OWNER = os.getenv("GITHUB_DEFAULT_OWNER", "KYWILS21").strip()
-
+# Canvas LMS Configuration
 CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL", "https://templeu.instructure.com").rstrip("/")
-CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "").strip()
-CANVAS_SESSION_COOKIE = os.getenv("CANVAS_SESSION_COOKIE", "").strip()
+CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN", "")
 
-PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "").strip()
-PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+# Gmail IMAP / SMTP Configuration
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", os.getenv("SMTP_USER", ""))
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", os.getenv("SMTP_PASSWORD", ""))
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+# Google Calendar Configuration
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+GOOGLE_CALENDAR_ICAL_URL = os.getenv("GOOGLE_CALENDAR_ICAL_URL", "")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
 
-async def autonomous_watchdog_daemon():
-    """Periodically scans Canvas and Google Calendar for upcoming deadlines and conflicts."""
-    await asyncio.sleep(60)  # Wait 60s post-boot
+# Executive Location / Weather Default
+DEFAULT_LOCATION = os.getenv("ARGUS_DEFAULT_LOCATION", "Philadelphia, PA")
 
-    while True:
+
+# =========================================================================================
+# SECTION 2: PERSISTENT 8-TABLE SQLITE MEMORY & KNOWLEDGE GRAPH ENGINE
+# =========================================================================================
+
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_argus_database() -> None:
+    """Initializes all 8 core persistent tables for the ARGUS Jarvis OS."""
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    # 1. Episodic Conversation Memory
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata TEXT DEFAULT '{}',
+            created_at REAL NOT NULL
+        )
+    """)
+
+    # 2. Semantic Knowledge Graph Facts
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_facts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity TEXT NOT NULL,
+            fact_key TEXT NOT NULL,
+            fact_value TEXT NOT NULL,
+            category TEXT DEFAULT 'general',
+            source_url TEXT DEFAULT '',
+            confidence REAL DEFAULT 1.0,
+            updated_at REAL NOT NULL
+        )
+    """)
+
+    # 3. Human-in-the-Loop (HITL) Creative & Action Proposals
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pending_tasks (
+            task_id TEXT PRIMARY KEY,
+            objective TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            research_dossier TEXT NOT NULL,
+            creative_proposal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            artifact_slug TEXT NOT NULL,
+            user_feedback TEXT DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
+
+    # 4. Generated Web Apps, Scripts & Code Artifacts Registry
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS generated_artifacts (
+            slug TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            preview_url TEXT NOT NULL,
+            version INTEGER DEFAULT 1,
+            design_notes TEXT DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
+
+    # 5. Local + Synced Calendar Events Table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            event_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            location TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            attendees TEXT DEFAULT '',
+            source TEXT DEFAULT 'local',
+            status TEXT DEFAULT 'confirmed',
+            created_at REAL NOT NULL
+        )
+    """)
+
+    # 6. Email Outbox, Drafts & Triage Cache
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS email_records (
+            email_id TEXT PRIMARY KEY,
+            direction TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+    """)
+
+    # 7. Canvas LMS Synced Assignments & Course Cache
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS canvas_items (
+            item_id TEXT PRIMARY KEY,
+            course_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            due_at TEXT DEFAULT '',
+            points_possible REAL DEFAULT 0.0,
+            submission_status TEXT DEFAULT 'unsubmitted',
+            html_url TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            synced_at REAL NOT NULL
+        )
+    """)
+
+    # 8. Executive Action & Tool Audit Log
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS system_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor TEXT NOT NULL,
+            action_name TEXT NOT NULL,
+            payload TEXT DEFAULT '',
+            status TEXT NOT NULL,
+            execution_ms REAL DEFAULT 0.0,
+            timestamp REAL NOT NULL
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+init_argus_database()
+
+
+def log_audit_event(action_name: str, payload: Any, status: str = "SUCCESS", execution_ms: float = 0.0) -> None:
+    """Records every autonomous tool execution into the SQLite audit trail."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        payload_str = json.dumps(payload) if not isinstance(payload, str) else payload
+        c.execute(
+            "INSERT INTO system_audit_log (actor, action_name, payload, status, execution_ms, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            ("ARGUS_CORE", action_name, payload_str[:2000], status, execution_ms, time.time())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Audit Logger Warning]: {e}")
+
+
+def save_conversation_turn(session_id: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    """Persists conversation history in SQLite."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO conversations (session_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session_id, role, content, json.dumps(metadata or {}), time.time())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Memory Warning]: {e}")
+
+
+def get_recent_conversation(session_id: str, limit: int = 10) -> List[Dict[str, str]]:
+    """Retrieves recent conversation context for continuity."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute(
+            "SELECT role, content FROM conversations WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, limit)
+        )
+        rows = c.fetchall()
+        conn.close()
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    except Exception:
+        return []
+
+
+def upsert_knowledge_fact(entity: str, fact_key: str, fact_value: str, category: str = "general", source_url: str = "") -> str:
+    """Inserts or updates a verified fact in the ARGUS semantic knowledge base."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        "SELECT id FROM knowledge_facts WHERE LOWER(entity) = LOWER(?) AND LOWER(fact_key) = LOWER(?)",
+        (entity.strip(), fact_key.strip())
+    )
+    existing = c.fetchone()
+    now = time.time()
+    if existing:
+        c.execute(
+            "UPDATE knowledge_facts SET fact_value = ?, category = ?, source_url = ?, updated_at = ? WHERE id = ?",
+            (fact_value, category, source_url, now, existing["id"])
+        )
+        action = "Updated"
+    else:
+        c.execute(
+            "INSERT INTO knowledge_facts (entity, fact_key, fact_value, category, source_url, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (entity.strip(), fact_key.strip(), fact_value, category, source_url, now)
+        )
+        action = "Stored"
+    conn.commit()
+    conn.close()
+    return f"{action} Knowledge Fact: [{entity}] {fact_key} = {fact_value}"
+
+
+def query_knowledge_graph(search_term: str = "", limit: int = 25) -> List[Dict[str, Any]]:
+    """Searches persistent facts stored in the SQLite Knowledge Graph."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    if search_term.strip():
+        q = f"%{search_term.strip()}%"
+        c.execute(
+            "SELECT entity, fact_key, fact_value, category, source_url, updated_at FROM knowledge_facts "
+            "WHERE entity LIKE ? OR fact_key LIKE ? OR fact_value LIKE ? OR category LIKE ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (q, q, q, q, limit)
+        )
+    else:
+        c.execute(
+            "SELECT entity, fact_key, fact_value, category, source_url, updated_at FROM knowledge_facts "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (limit,)
+        )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+# =========================================================================================
+# SECTION 3: DYNAMIC GROQ MULTI-MODEL DISCOVERY & SELF-HEALING LLM ROUTER
+# =========================================================================================
+
+_CACHED_GROQ_MODELS: List[str] = []
+_LAST_MODEL_FETCH: float = 0.0
+
+
+def get_available_groq_models() -> List[str]:
+    """Queries Groq API for live text/reasoning models and caches for 10 minutes."""
+    global _CACHED_GROQ_MODELS, _LAST_MODEL_FETCH
+    now = time.time()
+    if _CACHED_GROQ_MODELS and (now - _LAST_MODEL_FETCH < 600):
+        return _CACHED_GROQ_MODELS
+
+    discovered: List[str] = []
+    if groq_client:
         try:
-            # Check imminent Calendar events (starting within 3 hours)
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            horizon = (now_utc + datetime.timedelta(hours=3)).isoformat()
-            events = fetch_raw_calendar_events(time_min_iso=now_utc.isoformat(), max_results=5)
-
-            for ev in events:
-                start_str = ev.get("start")
-                if start_str and start_str <= horizon:
-                    conn = sqlite3.connect(DATABASE_URL)
-                    cur = conn.cursor()
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS system_state_cache (
-                            key TEXT PRIMARY KEY,
-                            last_seen_val TEXT,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-                    ev_id = str(ev.get("id"))
-                    cur.execute("SELECT last_seen_val FROM system_state_cache WHERE key = ?", (f"cal_{ev_id}",))
-                    if not cur.fetchone():
-                        cur.execute("INSERT OR REPLACE INTO system_state_cache (key, last_seen_val) VALUES (?, ?)", (f"cal_{ev_id}", ev.get("summary")))
-                        conn.commit()
-                        conn.close()
-                        send_iphone_push("Upcoming Schedule Alert", f"Event starting soon: {ev.get('summary')} at {start_str}", priority=1)
-                    else:
-                        conn.close()
+            resp = groq_client.models.list()
+            for m in resp.data:
+                mid = m.id
+                if not any(bad in mid.lower() for bad in ["whisper", "guard", "tts", "embed", "vision", "playai"]):
+                    discovered.append(mid)
         except Exception as e:
-            print(f"Watchdog exception: {e}")
+            print(f"[ARGUS Model Discovery Warning]: {e}")
 
-        await asyncio.sleep(1200)  # Poll every 20 minutes
+    priority_order = [
+        GROQ_MODEL,
+        "llama-3.3-70b-versatile",
+        "deepseek-r1-distill-llama-70b",
+        "qwen-qwq-32b",
+        "llama3-70b-8192",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it",
+        "llama3-8b-8192"
+    ]
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    watchdog = asyncio.create_task(autonomous_watchdog_daemon())
-    yield
-    watchdog.cancel()
+    ordered: List[str] = []
+    for p in priority_order:
+        if p and (not discovered or p in discovered) and p not in ordered:
+            ordered.append(p)
+    for d in discovered:
+        if d not in ordered:
+            ordered.append(d)
 
-app = FastAPI(title="ARGUS Core Protocol Engine", version="2.9.0", lifespan=lifespan)
+    _CACHED_GROQ_MODELS = ordered if ordered else ["llama-3.3-70b-versatile"]
+    _LAST_MODEL_FETCH = now
+    return _CACHED_GROQ_MODELS
 
-# Create a demos directory
-DEMO_DIR = os.path.join(os.path.dirname(__file__), "generated_demos")
-os.makedirs(DEMO_DIR, exist_ok=True)
 
-@app.get("/preview/{slug}", response_class=HTMLResponse)
-def serve_client_demo(slug: str):
-    safe_slug = "".join(c for c in slug if c.isalnum() or c in ("-", "_")).lower()
-    file_path = os.path.join(DEMO_DIR, f"{safe_slug}.html")
+def groq_resilient_completion(
+    messages: List[Dict[str, Any]],
+    temperature: float = 0.3,
+    max_tokens: int = 3500,
+    json_mode: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[str] = None
+) -> Any:
+    """
+    Executes a Groq chat completion with automatic multi-model failover.
+    Strips <think>...</think> blocks if a reasoning model (like DeepSeek-R1 or QwQ) is selected.
+    """
+    if not groq_client:
+        raise RuntimeError("GROQ_API_KEY is missing or Groq client failed to initialize.")
+
+    models = get_available_groq_models()
+    last_error = None
+
+    for model_id in models:
+        try:
+            kwargs: Dict[str, Any] = {
+                "model": model_id,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            if tools:
+                kwargs["tools"] = tools
+                if tool_choice:
+                    kwargs["tool_choice"] = tool_choice
+
+            resp = groq_client.chat.completions.create(**kwargs)
+            return resp
+        except Exception as e:
+            print(f"[ARGUS LLM Failover] Model '{model_id}' error: {e}")
+            last_error = e
+            # If tool calling or json_mode failed on a specific model, continue to next model
+            continue
+
+    raise RuntimeError(f"All active Groq models failed. Last error: {last_error}")
+
+
+def clean_llm_text(raw_text: str, strip_fences: bool = False) -> str:
+    """Removes <think> tags from reasoning models and optionally strips markdown code fences."""
+    if not raw_text:
+        return ""
+    cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+    if strip_fences and cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    return cleaned
+
+
+# =========================================================================================
+# SECTION 4: CANVAS LMS ACADEMIC & PROJECT INTEGRATION ENGINE
+# =========================================================================================
+
+def canvas_api_get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """Performs an authenticated GET request against the Canvas LMS REST API."""
+    if not CANVAS_API_TOKEN:
+        return None
+    url = f"{CANVAS_BASE_URL}/api/v1/{endpoint.lstrip('/')}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {CANVAS_API_TOKEN}",
+            "Accept": "application/json",
+            "User-Agent": "ARGUS-Executive-OS/4.0"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception as e:
+        print(f"[Canvas API Warning] {endpoint}: {e}")
+        return None
+
+
+def tool_canvas_sync_and_summary(days_ahead: int = 14) -> str:
+    """
+    Fetches active courses, upcoming assignments, due dates, and submission statuses from Canvas LMS.
+    Caches items in SQLite and returns a structured academic/project briefing.
+    """
+    t0 = time.time()
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if CANVAS_API_TOKEN:
+        courses = canvas_api_get("courses", {"enrollment_state": "active", "per_page": 20})
+        if isinstance(courses, list):
+            for course in courses:
+                cid = course.get("id")
+                cname = course.get("name") or course.get("course_code") or f"Course {cid}"
+                if not cid:
+                    continue
+                assignments = canvas_api_get(
+                    f"courses/{cid}/assignments",
+                    {"per_page": 30, "order_by": "due_at", "include[]": "submission"}
+                )
+                if isinstance(assignments, list):
+                    for a in assignments:
+                        aid = f"canvas-{a.get('id')}"
+                        title = a.get("name", "Untitled Assignment")
+                        due_at = a.get("due_at") or ""
+                        pts = float(a.get("points_possible") or 0.0)
+                        html_url = a.get("html_url") or ""
+                        desc = re.sub(r'<[^>]+>', ' ', a.get("description") or "").strip()[:500]
+                        sub = a.get("submission") or {}
+                        sub_status = sub.get("workflow_state", "unsubmitted")
+                        if sub.get("submitted_at"):
+                            sub_status = f"submitted (score: {sub.get('score', 'pending')})"
+
+                        c.execute("""
+                            INSERT OR REPLACE INTO canvas_items
+                            (item_id, course_name, title, item_type, due_at, points_possible, submission_status, html_url, description, synced_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (aid, cname, title, "assignment", due_at, pts, sub_status, html_url, desc, time.time()))
+            conn.commit()
+
+    # Query cached + live items from SQLite
+    c.execute("SELECT * FROM canvas_items ORDER BY CASE WHEN due_at = '' THEN 1 ELSE 0 END, due_at ASC LIMIT 25")
+    items = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    log_audit_event("canvas_sync_and_summary", {"days_ahead": days_ahead, "count": len(items)}, "SUCCESS", (time.time() - t0) * 1000)
+
+    if not items:
+        status_note = (
+            "No Canvas assignments currently cached. (Set `CANVAS_API_TOKEN` in `.env` for live Temple Canvas sync, "
+            "or use `canvas_add_custom_task` to track coursework/deadlines manually.)"
+        )
+        return status_note
+
+    lines = ["### ðŸŽ“ Canvas LMS Coursework & Deadlines"]
+    for it in items:
+        due_str = it["due_at"][:16].replace("T", " ") if it["due_at"] else "No due date"
+        lines.append(
+            f"- **[{it['course_name']}] {it['title']}** â€” Due: `{due_str}` | "
+            f"Points: `{it['points_possible']}` | Status: `{it['submission_status']}`"
+        )
+    return "\n".join(lines)
+
+
+def tool_canvas_add_local_item(course_name: str, title: str, due_at: str, points: float = 100.0, description: str = "") -> str:
+    """Adds or updates a tracked academic assignment, exam, or milestone in ARGUS's Canvas table."""
+    item_id = f"local-canvas-{int(time.time())}"
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO canvas_items
+        (item_id, course_name, title, item_type, due_at, points_possible, submission_status, html_url, description, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (item_id, course_name, title, "assignment", due_at, points, "pending", "", description, time.time()))
+    conn.commit()
+    conn.close()
+    return f"Added Canvas tracker item: [{course_name}] '{title}' due {due_at} ({points} pts)."
+
+
+# =========================================================================================
+# SECTION 5: GOOGLE CALENDAR & SCHEDULING ENGINE
+# =========================================================================================
+
+def tool_calendar_list_events(days: int = 7) -> str:
+    """Lists upcoming events from local SQLite calendar cache and optional Google Calendar iCal feed."""
+    t0 = time.time()
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    # Optional: Parse live iCal feed if GOOGLE_CALENDAR_ICAL_URL is configured
+    if GOOGLE_CALENDAR_ICAL_URL:
+        try:
+            req = urllib.request.Request(GOOGLE_CALENDAR_ICAL_URL, headers={"User-Agent": "ARGUS-OS/4.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                ics_text = resp.read().decode("utf-8", errors="ignore")
+            blocks = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', ics_text, flags=re.DOTALL)
+            for b in blocks[:25]:
+                uid_m = re.search(r'UID:(.*)', b)
+                sum_m = re.search(r'SUMMARY:(.*)', b)
+                dtstart_m = re.search(r'DTSTART[^:]*:(.*)', b)
+                dtend_m = re.search(r'DTEND[^:]*:(.*)', b)
+                loc_m = re.search(r'LOCATION:(.*)', b)
+                if sum_m and dtstart_m:
+                    ev_id = (uid_m.group(1).strip() if uid_m else str(uuid.uuid4()))[:60]
+                    c.execute("""
+                        INSERT OR REPLACE INTO calendar_events
+                        (event_id, title, start_time, end_time, location, description, attendees, source, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'google_ical', 'confirmed', ?)
+                    """, (
+                        ev_id,
+                        sum_m.group(1).strip(),
+                        dtstart_m.group(1).strip(),
+                        dtend_m.group(1).strip() if dtend_m else "",
+                        loc_m.group(1).strip() if loc_m else "",
+                        "", "", time.time()
+                    ))
+            conn.commit()
+        except Exception as e:
+            print(f"[Google Calendar iCal Sync Warning]: {e}")
+
+    c.execute("SELECT * FROM calendar_events WHERE status != 'cancelled' ORDER BY start_time ASC LIMIT 30")
+    events = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    log_audit_event("calendar_list_events", {"days": days, "count": len(events)}, "SUCCESS", (time.time() - t0) * 1000)
+
+    if not events:
+        return "ðŸ“… Your schedule is clearâ€”no upcoming calendar events found."
+
+    out = ["### ðŸ“… Upcoming Schedule & Calendar Events"]
+    for ev in events:
+        loc_str = f" @ {ev['location']}" if ev.get("location") else ""
+        out.append(f"- **`{ev['start_time']}` â†’ `{ev['end_time']}`**: **{ev['title']}**{loc_str} *(ID: `{ev['event_id']}`)*")
+    return "\n".join(out)
+
+
+def tool_calendar_add_event(
+    title: str,
+    start_time: str,
+    end_time: str,
+    location: str = "",
+    description: str = "",
+    attendees: str = ""
+) -> str:
+    """Schedules a new event on the ARGUS Calendar and persists it in SQLite."""
+    ev_id = f"evt-{int(time.time())}-{uuid.uuid4().hex[:4]}"
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO calendar_events
+        (event_id, title, start_time, end_time, location, description, attendees, source, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'argus_calendar', 'confirmed', ?)
+    """, (ev_id, title, start_time, end_time, location, description, attendees, time.time()))
+    conn.commit()
+    conn.close()
+    log_audit_event("calendar_add_event", {"title": title, "start_time": start_time}, "SUCCESS")
+    return f"âœ… Scheduled Calendar Event: **{title}** from `{start_time}` to `{end_time}` {f'at {location}' if location else ''} (Event ID: `{ev_id}`)."
+
+
+def tool_calendar_delete_event(event_id_or_title: str) -> str:
+    """Cancels/deletes an event from the calendar by ID or partial title match."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE calendar_events SET status = 'cancelled' WHERE event_id = ? OR LOWER(title) LIKE LOWER(?)",
+        (event_id_or_title.strip(), f"%{event_id_or_title.strip()}%")
+    )
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return f"ðŸ—‘ï¸ Cancelled {affected} matching calendar event(s) for `{event_id_or_title}`."
+
+
+# =========================================================================================
+# SECTION 6: GMAIL COMMUNICATIONS ENGINE (IMAP INBOX READER + SMTP / DRAFT DISPATCHER)
+# =========================================================================================
+
+def tool_gmail_read_inbox(max_emails: int = 8, search_filter: str = "ALL") -> str:
+    """
+    Reads recent emails from Gmail via IMAP (if credentials configured) plus local SQLite email records.
+    """
+    t0 = time.time()
+    fetched_summaries: List[str] = []
+
+    if GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
+        try:
+            mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+            mail.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            mail.select("inbox")
+            criterion = f'(TEXT "{search_filter}")' if search_filter and search_filter.upper() != "ALL" else "ALL"
+            status, data = mail.search(None, criterion)
+            if status == "OK" and data and data[0]:
+                ids = data[0].split()[-max_emails:]
+                for num in reversed(ids):
+                    res, msg_data = mail.fetch(num, "(RFC822)")
+                    if res == "OK" and msg_data and msg_data[0]:
+                        msg = email.message_from_bytes(msg_data[0][1])
+                        subj = msg.get("Subject", "(No Subject)")
+                        sender = msg.get("From", "Unknown")
+                        date_str = msg.get("Date", "")
+                        snippet = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == "text/plain":
+                                    payload = part.get_payload(decode=True)
+                                    if payload:
+                                        snippet = payload.decode("utf-8", errors="ignore").strip()[:220]
+                                        break
+                        else:
+                            payload = msg.get_payload(decode=True)
+                            if payload:
+                                snippet = payload.decode("utf-8", errors="ignore").strip()[:220]
+                        fetched_summaries.append(f"- **From:** `{sender}` | **Subject:** **{subj}** ({date_str})\n  > {snippet}")
+            mail.logout()
+        except Exception as e:
+            print(f"[Gmail IMAP Warning]: {e}")
+
+    # Also query local SQLite email_records
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM email_records ORDER BY created_at DESC LIMIT ?", (max_emails,))
+    local_emails = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    for em in local_emails:
+        fetched_summaries.append(
+            f"- **[{em['status'].upper()} / {em['direction']}] To:** `{em['recipient']}` | **Subject:** **{em['subject']}**\n"
+            f"  > {em['body'][:200]}"
+        )
+
+    log_audit_event("gmail_read_inbox", {"max_emails": max_emails, "filter": search_filter}, "SUCCESS", (time.time() - t0) * 1000)
+
+    if not fetched_summaries:
+        return "ðŸ“¬ No emails found in inbox or local dispatch log. (Set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in `.env` for live IMAP inbox sync.)"
+
+    return "### ðŸ“¬ Gmail Inbox & Communications Log\n" + "\n".join(fetched_summaries[:max_emails])
+
+
+def tool_gmail_send_or_draft(recipient: str, subject: str, body: str, send_immediately: bool = False) -> str:
+    """
+    Sends a live email via Gmail SMTP if `send_immediately=True` and credentials exist;
+    otherwise saves as an approved/pending draft in SQLite.
+    """
+    email_id = f"msg-{int(time.time())}"
+    status = "draft_saved"
+
+    if send_immediately and GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
+        try:
+            msg = MIMEMultipart()
+            msg["From"] = GMAIL_ADDRESS
+            msg["To"] = recipient
+            msg["Subject"] = subject
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
+            server.starttls()
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            status = "sent_live"
+        except Exception as e:
+            status = f"smtp_error_saved_draft ({e})"
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO email_records (email_id, direction, sender, recipient, subject, body, status, created_at)
+        VALUES (?, 'outbound', ?, ?, ?, ?, ?, ?)
+    """, (email_id, GMAIL_ADDRESS or "argus@executive.local", recipient, subject, body, status, time.time()))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("gmail_send_or_draft", {"recipient": recipient, "subject": subject, "status": status}, "SUCCESS")
+    return (
+        f"âœ‰ï¸ **Email Action (`{status}`)**\n"
+        f"- **To:** `{recipient}`\n"
+        f"- **Subject:** {subject}\n"
+        f"- **Message ID:** `{email_id}`"
+    )
+
+
+# =========================================================================================
+# SECTION 7: LIVE WEATHER & EXECUTIVE BRIEFING SYNTHESIZER
+# =========================================================================================
+
+def fetch_live_weather(location: str = DEFAULT_LOCATION) -> str:
+    """Fetches real-time weather conditions via wttr.in JSON API."""
+    try:
+        loc_enc = urllib.parse.quote(location)
+        req = urllib.request.Request(
+            f"[https://wttr.in/](https://wttr.in/){loc_enc}?format=j1",
+            headers={"User-Agent": "Mozilla/5.0 (ARGUS-Weather/4.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        curr = data.get("current_condition", [{}])[0]
+        temp_f = curr.get("temp_F", "N/A")
+        feels_f = curr.get("FeelsLikeF", "N/A")
+        desc = curr.get("weatherDesc", [{"value": "Clear"}])[0].get("value", "Clear")
+        humidity = curr.get("humidity", "N/A")
+        return f"{location}: {desc}, {temp_f}Â°F (Feels like {feels_f}Â°F), Humidity {humidity}%"
+    except Exception:
+        return f"{location}: Weather feed temporarily offline"
+
+
+def generate_executive_briefing(location: str = DEFAULT_LOCATION) -> str:
+    """
+    Aggregates live weather, calendar schedule, Canvas LMS deadlines, Gmail inbox,
+    pending creative approvals, and generated demos into an AI-synthesized Executive Briefing.
+    """
+    weather_report = fetch_live_weather(location)
+    calendar_report = tool_calendar_list_events(days=7)
+    canvas_report = tool_canvas_sync_and_summary(days_ahead=14)
+    gmail_report = tool_gmail_read_inbox(max_emails=5)
+    facts = query_knowledge_graph(limit=10)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT task_id, objective, status, artifact_slug FROM pending_tasks ORDER BY created_at DESC LIMIT 5")
+    tasks = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT slug, title, preview_url, updated_at FROM generated_artifacts ORDER BY updated_at DESC LIMIT 8")
+    demos = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    now_str = datetime.datetime.now().strftime("%A, %B %d, %Y â€” %I:%M %p")
+
+    raw_state = f"""
+    TIMESTAMP: {now_str}
+    WEATHER: {weather_report}
+
+    {calendar_report}
+
+    {canvas_report}
+
+    {gmail_report}
+
+    RECENT TASKS / CREATIVE APPROVAL QUEUE:
+    {json.dumps(tasks, indent=2)}
+
+    DEPLOYED WEB APPLICATIONS:
+    {json.dumps(demos, indent=2)}
+
+    RECENT KNOWLEDGE GRAPH FACTS:
+    {json.dumps(facts, indent=2)}
+    """
+
+    try:
+        resp = groq_resilient_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are ARGUS, a Jarvis-class Executive AI Assistant for Kyle Wilson. "
+                        "Synthesize the live telemetry below into a crisp, high-impact Executive Daily Briefing with clear Markdown sections, "
+                        "actionable priorities, and links to any deployed demos or pending approvals."
+                    )
+                },
+                {"role": "user", "content": raw_state}
+            ],
+            temperature=0.25,
+            max_tokens=1800
+        )
+        return clean_llm_text(resp.choices[0].message.content)
+    except Exception:
+        return f"## ðŸ›¡ï¸ ARGUS Executive Daily Briefing ({now_str})\n\n**Weather:** {weather_report}\n\n{calendar_report}\n\n{canvas_report}\n\n{gmail_report}"
+
+    # =========================================================================================
+# SECTION 8: MULTI-HOP DEEP WEB & MEDIA RESEARCH ENGINE (JINA + DDGS + BING PROXY)
+# =========================================================================================
+
+def tool_web_search(query: str, max_results: int = 8) -> str:
+    """
+    Executes a multi-source live web search via Jina Reader Search (s.jina.ai),
+    DuckDuckGo Text Search, and Yahoo HTML fallback.
+    """
+    t0 = time.time()
+    chunks: List[str] = []
+
+    # 1. Primary Cloud-Friendly Jina Search Reader
+    try:
+        enc_q = urllib.parse.quote(query)
+        req = urllib.request.Request(
+            f"https://s.jina.ai/{enc_q}",
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; ARGUS-OS/4.0; +https://argus.local)",
+                "Accept": "text/plain"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            jina_md = resp.read().decode("utf-8", errors="ignore")
+            if len(jina_md) > 180:
+                chunks.append(f"=== JINA LIVE SEARCH ({query}) ===\n{jina_md[:5500]}")
+    except Exception as e:
+        print(f"[Jina Search Warning] '{query}': {e}")
+
+    # 2. Secondary DuckDuckGo Search
+    if DDGS:
+        try:
+            with DDGS() as ddgs:
+                for r in list(ddgs.text(query, max_results=max_results)):
+                    title = r.get("title", "")
+                    href = r.get("href", "")
+                    body = r.get("body", "")
+                    if body:
+                        chunks.append(f"SOURCE [{title}]({href}): {body}")
+        except Exception as e:
+            print(f"[DDGS Search Warning] '{query}': {e}")
+
+    # 3. Tertiary Yahoo Search Fallback (if cloud IP is throttled)
+    if not chunks:
+        try:
+            enc_q = urllib.parse.quote(query)
+            y_url = f"https://search.yahoo.com/search?p={enc_q}"
+            req = urllib.request.Request(
+                y_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                y_html = resp.read().decode("utf-8", errors="ignore")
+            clean_y = re.sub(r'<script.*?</script>', ' ', y_html, flags=re.DOTALL | re.I)
+            clean_y = re.sub(r'<style.*?</style>', ' ', clean_y, flags=re.DOTALL | re.I)
+            snippets = re.findall(r'<div[^>]*class="[^"]*compText[^"]*"[^>]*>(.*?)</div>', clean_y)
+            for s in snippets[:max_results]:
+                txt = re.sub(r'<[^>]+>', ' ', s).strip()
+                if len(txt) > 25:
+                    chunks.append(f"WEB SNIPPET: {txt}")
+        except Exception as e:
+            print(f"[Yahoo Fallback Warning]: {e}")
+
+    output = "\n\n".join(chunks)[:9000] if chunks else f"No live web snippets returned for '{query}'."
+    log_audit_event("web_search", {"query": query, "chars": len(output)}, "SUCCESS", (time.time() - t0) * 1000)
+    return output
+
+
+def tool_read_webpage(url: str) -> str:
+    """
+    Scrapes and converts any live URL into clean, structured Markdown via r.jina.ai,
+    with direct urllib HTML-to-text + image extraction fallback.
+    """
+    t0 = time.time()
+    clean_url = url.strip()
+    if not clean_url.startswith("http"):
+        clean_url = "https://" + clean_url
+
+    extracted_images: List[str] = []
+    page_text = ""
+
+    # 1. Try Jina Reader API first
+    try:
+        req = urllib.request.Request(
+            f"https://r.jina.ai/{clean_url}",
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; ARGUS-OS/4.0)",
+                "Accept": "text/plain"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            page_text = resp.read().decode("utf-8", errors="ignore")[:7500]
+            md_imgs = re.findall(r'!\[.*?\]\((https?://[^\s\)]+)\)', page_text)
+            extracted_images.extend(md_imgs[:10])
+    except Exception as e:
+        print(f"[Jina Reader Warning] {clean_url}: {e}")
+
+    # 2. Direct HTML Crawl for <meta og:image>, <img> tags, and raw text fallback
+    try:
+        req = urllib.request.Request(
+            clean_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw_html = resp.read().decode("utf-8", errors="ignore")
+
+        parsed = urllib.parse.urlparse(clean_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+
+        og_imgs = re.findall(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', raw_html, re.I)
+        img_tags = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', raw_html, re.I)
+        for src in (og_imgs + img_tags):
+            full_img = urllib.parse.urljoin(origin, src.strip())
+            if full_img.startswith("http") and any(ext in full_img.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                if not any(b in full_img.lower() for b in ["spacer", "1x1", "pixel", "icon", "svg", "spinner"]):
+                    if full_img not in extracted_images:
+                        extracted_images.append(full_img)
+
+        if not page_text:
+            body_no_js = re.sub(r'<script.*?</script>', ' ', raw_html, flags=re.DOTALL | re.I)
+            body_no_css = re.sub(r'<style.*?</style>', ' ', body_no_js, flags=re.DOTALL | re.I)
+            plain = re.sub(r'<[^>]+>', ' ', body_no_css)
+            page_text = re.sub(r'\s+', ' ', plain).strip()[:6500]
+    except Exception as e:
+        print(f"[Direct Webpage Crawl Warning] {clean_url}: {e}")
+
+    log_audit_event("read_webpage", {"url": clean_url, "imgs": len(extracted_images)}, "SUCCESS", (time.time() - t0) * 1000)
+
+    img_block = "\n".join(f"- {u}" for u in extracted_images[:10]) if extracted_images else "None extracted"
+    return f"=== WEBPAGE CONTENT ({clean_url}) ===\n{page_text}\n\n=== EXTRACTED SITE IMAGES ===\n{img_block}"
+
+
+def tool_image_search(query: str, count: int = 6) -> str:
+    """
+    Harvests verified, high-resolution image URLs for any dish, product, storefront, or concept.
+    Uses DDGS Images first and guarantees unique, working URLs via Bing's live visual proxy.
+    """
+    t0 = time.time()
+    found_urls: List[str] = []
+    bad_tokens = [".svg", "logo", "icon", "favicon", "1x1", "pixel", "badge", "spinner", "avatar"]
+
+    if DDGS:
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.images(query, max_results=count * 2))
+                for r in results:
+                    u = r.get("image", "")
+                    if u.startswith("http") and not any(b in u.lower() for b in bad_tokens):
+                        if u not in found_urls:
+                            found_urls.append(u)
+                            if len(found_urls) >= count:
+                                break
+        except Exception as e:
+            print(f"[DDGS Image Search Warning] '{query}': {e}")
+
+    # Guarantee working visual URLs via Bing thumbnail proxy so cloud rate-limits never produce broken images
+    while len(found_urls) < count:
+        idx = len(found_urls) + 1
+        q_enc = urllib.parse.quote(f"{query} high resolution photo {idx}")
+        proxy_url = f"https://tse2.mm.bing.net/th?q={q_enc}&w=900&h=650&c=7&rs=1&p=0"
+        found_urls.append(proxy_url)
+
+    log_audit_event("image_search", {"query": query, "count": len(found_urls)}, "SUCCESS", (time.time() - t0) * 1000)
+    return json.dumps({"query": query, "image_urls": found_urls[:count]}, indent=2)
+
+
+# =========================================================================================
+# SECTION 9: LIVE WORKSPACE & SELF-HEALING HTML / CODE PATCHING ENGINE
+# =========================================================================================
+
+def tool_list_generated_demos() -> str:
+    """Lists all generated websites, apps, and code artifacts stored in DEMO_DIR and SQLite."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT slug, title, artifact_type, preview_url, version, updated_at FROM generated_artifacts ORDER BY updated_at DESC")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    # Also scan disk for any HTML files created prior to v4.0 registry
+    disk_files = [f for f in os.listdir(DEMO_DIR) if f.endswith(".html")]
+    known_slugs = {r["slug"] for r in rows}
+    for df in disk_files:
+        s = df[:-5]
+        if s not in known_slugs:
+            rows.append({
+                "slug": s,
+                "title": s.replace("-", " ").title(),
+                "artifact_type": "webapp",
+                "preview_url": f"{RENDER_EXTERNAL_URL}/preview/{s}",
+                "version": 1,
+                "updated_at": os.path.getmtime(os.path.join(DEMO_DIR, df))
+            })
+
+    if not rows:
+        return "No generated web applications or demos found yet."
+
+    lines = ["### ðŸŒ ARGUS Deployed Web Applications & Artifacts"]
+    for r in rows:
+        lines.append(
+            f"- **`{r['slug']}`** ({r['title']} â€” v{r['version']}) â†’ [{r['preview_url']}]({r['preview_url']})"
+        )
+    return "\n".join(lines)
+
+
+def tool_inspect_artifact_code(slug: str) -> str:
+    """Reads the source HTML/code of an existing generated demo so ARGUS can inspect or patch it."""
+    clean_slug = re.sub(r'[^a-z0-9\-]', '', slug.lower())
+    file_path = os.path.join(DEMO_DIR, f"{clean_slug}.html")
     if not os.path.exists(file_path):
-        return HTMLResponse(content="<h1>404 Demo Site Not Found</h1>", status_code=404)
-    with open(file_path, "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+        return f"Artifact `{clean_slug}.html` not found in `{DEMO_DIR}`."
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        code = f.read()
+    return f"=== SOURCE CODE FOR {clean_slug}.html ({len(code)} chars) ===\n{code[:10000]}"
 
-# ==============================================================================
-# CORS Configuration & Global Fallbacks
-# ==============================================================================
+
+def tool_patch_existing_webapp(slug: str, modification_instructions: str) -> str:
+    """
+    Self-healing live editor: Reads an existing generated website (`generated_demos/{slug}.html`),
+    applies the user's requested visual, structural, or interactive edits via Groq, and saves the new version.
+    """
+    t0 = time.time()
+    clean_slug = re.sub(r'[^a-z0-9\-]', '', slug.lower())
+    file_path = os.path.join(DEMO_DIR, f"{clean_slug}.html")
+    if not os.path.exists(file_path):
+        # Try matching partial slug
+        candidates = [f[:-5] for f in os.listdir(DEMO_DIR) if f.endswith(".html") and clean_slug in f]
+        if candidates:
+            clean_slug = candidates[0]
+            file_path = os.path.join(DEMO_DIR, f"{clean_slug}.html")
+        else:
+            return f"âŒ Could not find an existing demo matching `{slug}` to edit."
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        current_html = f.read()
+
+    # Optional: Run an image or web search if the modification asks for new photos or facts
+    extra_assets = ""
+    if any(w in modification_instructions.lower() for w in ["photo", "image", "picture", "menu", "price", "add"]):
+        extra_assets = tool_image_search(f"{clean_slug} {modification_instructions}", count=4)
+
+    prompt = f"""
+    You are ARGUS's Autonomous Self-Healing Code & UI Editor.
+    Below is the current live HTML5/Tailwind/JS source code for `{clean_slug}.html`:
+
+    === CURRENT LIVE HTML ===
+    {current_html[:14000]}
+    === END CURRENT HTML ===
+
+    ADDITIONAL VISUAL ASSETS (IF NEEDED):
+    {extra_assets}
+
+    USER MODIFICATION DIRECTIVE:
+    {modification_instructions}
+
+    TASK:
+    Rewrite and return the COMPLETE, updated HTML5 file incorporating all requested changes while preserving working interactivity, real business data, and responsive styling.
+    Return ONLY raw valid HTML starting with `<!DOCTYPE html>`. No markdown wrappers or commentary.
+    """
+
+    resp = groq_resilient_completion(
+        messages=[
+            {"role": "system", "content": "Output ONLY raw valid HTML5 code starting with <!DOCTYPE html>."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,
+        max_tokens=6000
+    )
+
+    updated_html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
+    if "<!doctype html" not in updated_html.lower() and "<html" not in updated_html.lower():
+        return "âŒ Failed to compile valid HTML patch. Existing file was left untouched."
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(updated_html)
+
+    preview_url = f"{RENDER_EXTERNAL_URL}/preview/{clean_slug}"
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT version FROM generated_artifacts WHERE slug = ?", (clean_slug,))
+    row = c.fetchone()
+    new_ver = (row["version"] + 1) if row else 2
+    c.execute("""
+        INSERT OR REPLACE INTO generated_artifacts
+        (slug, title, artifact_type, objective, file_path, preview_url, version, design_notes, created_at, updated_at)
+        VALUES (?, ?, 'webapp', ?, ?, ?, ?, ?, ?, ?)
+    """, (clean_slug, clean_slug.upper(), modification_instructions, file_path, preview_url, new_ver, modification_instructions, time.time(), time.time()))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("patch_existing_webapp", {"slug": clean_slug, "version": new_ver}, "SUCCESS", (time.time() - t0) * 1000)
+    return (
+        f"### ðŸ› ï¸ Live Application Patched (`{clean_slug}` â€” v{new_ver})\n"
+        f"- **Updated Live URL:** [{preview_url}]({preview_url})\n"
+        f"- **Changes Applied:** {modification_instructions}"
+    )
+
+
+# =========================================================================================
+# SECTION 10: JARVIS 2-PHASE DEEP RESEARCH, CREATIVE APPROVAL GATE & ZERO-TEMPLATE COMPILER
+# =========================================================================================
+
+JARVIS_TOOL_DECLARATIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the live web for real business menus, prices, addresses, hours, reviews, technical docs, or news.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Targeted search query"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_webpage",
+            "description": "Read the full text and extract real image URLs from a specific website URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full https:// URL to scrape"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "image_search",
+            "description": "Find real photography URLs for specific dishes, products, services, or storefronts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Specific visual search query"},
+                    "count": {"type": "integer", "description": "Number of image URLs to retrieve (1-8)"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upsert_knowledge_fact",
+            "description": "Save or update a verified fact in ARGUS's persistent SQLite Knowledge Graph.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "Business, person, course, or topic name"},
+                    "fact_key": {"type": "string", "description": "Attribute name (e.g. address, phone, specialty, deadline)"},
+                    "fact_value": {"type": "string", "description": "Verified value"},
+                    "category": {"type": "string", "description": "Category tag"},
+                    "source_url": {"type": "string", "description": "Optional source URL"}
+                },
+                "required": ["entity", "fact_key", "fact_value"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_list_events",
+            "description": "List upcoming events on the user's calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Days ahead to inspect"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_add_event",
+            "description": "Schedule a new event on the user's calendar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start_time": {"type": "string", "description": "ISO or readable date/time"},
+                    "end_time": {"type": "string", "description": "ISO or readable date/time"},
+                    "location": {"type": "string"},
+                    "description": {"type": "string"}
+                },
+                "required": ["title", "start_time", "end_time"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calendar_delete_event",
+            "description": "Cancel or delete a calendar event by ID or title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id_or_title": {"type": "string"}
+                },
+                "required": ["event_id_or_title"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_read_inbox",
+            "description": "Read recent emails from the user's Gmail inbox and dispatch log.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_emails": {"type": "integer"},
+                    "search_filter": {"type": "string"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_send_or_draft",
+            "description": "Send a live email via Gmail SMTP or save an email draft.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                    "send_immediately": {"type": "boolean"}
+                },
+                "required": ["recipient", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "canvas_sync_and_summary",
+            "description": "Fetch active courses, assignments, and due dates from Canvas LMS.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {"type": "integer"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "canvas_add_local_item",
+            "description": "Track a new assignment, exam, or academic deadline in the Canvas tracker.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "course_name": {"type": "string"},
+                    "title": {"type": "string"},
+                    "due_at": {"type": "string"},
+                    "points": {"type": "number"},
+                    "description": {"type": "string"}
+                },
+                "required": ["course_name", "title", "due_at"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "executive_briefing",
+            "description": "Generate a full Executive Daily Briefing combining weather, calendar, Canvas deadlines, Gmail, and projects.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_existing_webapp",
+            "description": "Modify or upgrade an existing generated demo website by its slug.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string"},
+                    "modification_instructions": {"type": "string"}
+                },
+                "required": ["slug", "modification_instructions"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_generated_demos",
+            "description": "List all deployed websites and interactive demos built by ARGUS.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    }
+]
+
+
+def execute_jarvis_tool_call(fn_name: str, args: Dict[str, Any]) -> str:
+    """Dispatches any tool call from the Groq ReAct agent to the underlying Python subsystem."""
+    try:
+        if fn_name == "web_search":
+            return tool_web_search(args.get("query", ""), int(args.get("max_results", 6)))
+        elif fn_name == "read_webpage":
+            return tool_read_webpage(args.get("url", ""))
+        elif fn_name == "image_search":
+            return tool_image_search(args.get("query", ""), int(args.get("count", 5)))
+        elif fn_name == "upsert_knowledge_fact":
+            return upsert_knowledge_fact(
+                args.get("entity", "General"),
+                args.get("fact_key", "info"),
+                args.get("fact_value", ""),
+                args.get("category", "research"),
+                args.get("source_url", "")
+            )
+        elif fn_name == "calendar_list_events":
+            return tool_calendar_list_events(int(args.get("days", 7)))
+        elif fn_name == "calendar_add_event":
+            return tool_calendar_add_event(
+                args.get("title", "New Event"),
+                args.get("start_time", ""),
+                args.get("end_time", ""),
+                args.get("location", ""),
+                args.get("description", "")
+            )
+        elif fn_name == "calendar_delete_event":
+            return tool_calendar_delete_event(args.get("event_id_or_title", ""))
+        elif fn_name == "gmail_read_inbox":
+            return tool_gmail_read_inbox(int(args.get("max_emails", 6)), args.get("search_filter", "ALL"))
+        elif fn_name == "gmail_send_or_draft":
+            return tool_gmail_send_or_draft(
+                args.get("recipient", ""),
+                args.get("subject", ""),
+                args.get("body", ""),
+                bool(args.get("send_immediately", False))
+            )
+        elif fn_name == "canvas_sync_and_summary":
+            return tool_canvas_sync_and_summary(int(args.get("days_ahead", 14)))
+        elif fn_name == "canvas_add_local_item":
+            return tool_canvas_add_local_item(
+                args.get("course_name", "General"),
+                args.get("title", "Assignment"),
+                args.get("due_at", ""),
+                float(args.get("points", 100.0)),
+                args.get("description", "")
+            )
+        elif fn_name == "executive_briefing":
+            return generate_executive_briefing(args.get("location", DEFAULT_LOCATION))
+        elif fn_name == "patch_existing_webapp":
+            return tool_patch_existing_webapp(args.get("slug", ""), args.get("modification_instructions", ""))
+        elif fn_name == "list_generated_demos":
+            return tool_list_generated_demos()
+        else:
+            return f"Unknown tool `{fn_name}`."
+    except Exception as e:
+        return f"Tool `{fn_name}` execution error: {e}"
+
+
+def derive_clean_slug(objective: str) -> str:
+    """Extracts a clean, human-readable URL slug from the user's build objective."""
+    m = re.search(
+        r'(?:for|of|called|named)\s+([A-Za-z0-9\s\'\-&]+?)(?:\s+in\s+|\s+on\s+|\s+at\s+|\s+with\s+|\s+featuring\s+|$)',
+        objective,
+        re.IGNORECASE
+    )
+    candidate = m.group(1).strip() if m else objective
+    candidate = re.split(r'\s+(?:and\s+just|and\s+make|with|featuring|that\s+has)\b', candidate, flags=re.I)[0].strip()
+    slug = re.sub(r'[^a-z0-9]+', '', candidate.lower())[:32]
+    return slug if slug else f"app-{int(time.time())}"
+
+
+def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bool = False) -> str:
+    """
+    PHASE 1 OF CREATIVE BUILD:
+    1. Executes multi-hop live web searches, official site scraping, and targeted image harvesting.
+    2. Stores discovered facts in the SQLite Knowledge Graph.
+    3. Synthesizes a tailored Creative Direction & Architecture Proposal.
+    4. Either pauses for user approval (default HITL gate) or immediately compiles if `auto_execute=True`.
+    """
+    t0 = time.time()
+    slug = derive_clean_slug(user_objective)
+    research_log: List[str] = []
+
+    # Step 1: Always run baseline multi-vector web & image discovery so even non-tool models have rich data
+    baseline_web = tool_web_search(f"{user_objective} official site menu services prices address phone hours", max_results=8)
+    baseline_imgs = tool_image_search(user_objective, count=6)
+    research_log.append(f"=== BASELINE WEB INTEL ===\n{baseline_web}")
+    research_log.append(f"=== BASELINE VISUAL ASSETS ===\n{baseline_imgs}")
+
+    # Step 2: Run Autonomous Multi-Hop Tool Loop via Groq to deepen research (scrape specific URLs, specific dishes/services)
+    research_messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                "You are ARGUS's Deep Research & Creative Architecture Agent.\n"
+                "Your goal is to gather 100% authentic, specific intelligence for the user's build request, "
+                "and then write a comprehensive **Research Dossier & Creative Blueprint Proposal**.\n"
+                "1. Use `web_search`, `read_webpage`, `image_search`, and `upsert_knowledge_fact` to find exact menu items/services, "
+                "real prices, real street address, phone number, hours, customer reviews, and item-specific photo URLs.\n"
+                "2. Once you have enough real facts, output a well-structured Markdown proposal containing:\n"
+                "   - **Verified Entity Profile**: Official name, exact street address, phone number, hours, and brand reputation.\n"
+                "   - **Authentic Catalog (6â€“10 Real Items/Services)**: Exact names, prices, descriptions, and item photo URLs found.\n"
+                "   - **Proposed Creative Architecture**: Decide whether this should be a 1-page high-conversion experience or a multi-view SPA (and list the views), "
+                "propose a bespoke color palette (exact HEX codes), Google Fonts pairing, aesthetic vibe, and custom interactive JS features (e.g. live order bag with modifiers, tire/service estimator, appointment scheduler, interactive filter).\n"
+                "NEVER use generic placeholder data from other businesses."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                f"USER OBJECTIVE: {user_objective}\n\n"
+                f"INITIAL LIVE RESEARCH:\n{baseline_web[:4500]}\n\n"
+                f"INITIAL IMAGES:\n{baseline_imgs}\n\n"
+                "Perform any additional targeted searches or URL reads needed, then present the complete Research Dossier & Creative Blueprint Proposal."
+            )
+        }
+    ]
+
+    proposal_markdown = ""
+    for hop in range(4):
+        try:
+            resp = groq_resilient_completion(
+                messages=research_messages,
+                temperature=0.3,
+                max_tokens=2800,
+                tools=JARVIS_TOOL_DECLARATIONS,
+                tool_choice="auto"
+            )
+            msg = resp.choices[0].message
+            if not getattr(msg, "tool_calls", None):
+                proposal_markdown = clean_llm_text(msg.content or "")
+                break
+
+            research_messages.append(msg)
+            for tc in msg.tool_calls:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments)
+                except Exception:
+                    fn_args = {}
+                tool_out = execute_jarvis_tool_call(fn_name, fn_args)
+                research_log.append(f"=== HOP {hop+1} TOOL [{fn_name}({fn_args})] ===\n{tool_out}")
+                research_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": fn_name,
+                    "content": tool_out[:4500]
+                })
+        except Exception as e:
+            print(f"[ARGUS Research Hop {hop+1} Fallback]: {e}")
+            break
+
+    # If the loop finished tool calls without final text, synthesize the proposal now
+    if not proposal_markdown:
+        synth_resp = groq_resilient_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are ARGUS's Creative Director. Based on the live research dossier below, write a detailed "
+                        "**Research Dossier & Creative Blueprint Proposal** including: "
+                        "1) Verified Address, Phone, Hours & Brand Story; "
+                        "2) 6-10 Authentic Menu Items / Services with prices & image URLs; "
+                        "3) Bespoke Aesthetic Theme (exact HEX colors, Google Fonts, 1-page vs multi-page view structure, and custom interactive JS widgets)."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"OBJECTIVE: {user_objective}\n\nFULL RESEARCH LOG:\n" + "\n\n".join(research_log)[:10000]
+                }
+            ],
+            temperature=0.3,
+            max_tokens=2800
+        )
+        proposal_markdown = clean_llm_text(synth_resp.choices[0].message.content)
+
+    # Save the pending checkpoint in SQLite
+    task_id = f"task-{int(time.time())}"
+    full_dossier = "\n\n".join(research_log)[:20000]
+    now = time.time()
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO pending_tasks
+        (task_id, objective, task_type, research_dossier, creative_proposal, status, artifact_slug, user_feedback, created_at, updated_at)
+        VALUES (?, ?, 'webapp', ?, ?, 'PENDING_APPROVAL', ?, '', ?, ?)
+    """, (task_id, user_objective, full_dossier, proposal_markdown, slug, now, now))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("jarvis_research_and_propose", {"task_id": task_id, "slug": slug, "auto": auto_execute}, "SUCCESS", (time.time() - t0) * 1000)
+
+    if auto_execute:
+        return jarvis_compile_approved_task(task_id=task_id, user_feedback="Auto-approved by user flag.")
+
+    return (
+        f"## ðŸ§  ARGUS Deep Research Dossier & Creative Proposal (`{task_id}`)\n"
+        f"**Target Slug:** `/preview/{slug}`\n\n"
+        f"{proposal_markdown}\n\n"
+        f"---\n"
+        f"### â¸ï¸ Awaiting Your Creative Greenlight\n"
+        f"- **Approve as proposed:** Reply **`#argus approve`** (or click **Approve & Build** in the dashboard).\n"
+        f"- **Steer the creative direction:** Reply **`#argus approve: <your custom instructions>`** *(e.g. \"make it a 2-page dark industrial theme, use Oswald font, and add an interactive tire size calculator\")*."
+    )
+
+
+def jarvis_compile_approved_task(task_id: Optional[str] = None, user_feedback: str = "") -> str:
+    """
+    PHASE 2 OF CREATIVE BUILD (POST-APPROVAL):
+    Takes the approved Research Dossier + Creative Proposal + any User Overrides and writes a
+    100% bespoke, zero-template HTML5/Tailwind/JavaScript single- or multi-view web application from scratch.
+    """
+    t0 = time.time()
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if task_id:
+        c.execute("SELECT * FROM pending_tasks WHERE task_id = ?", (task_id,))
+    else:
+        c.execute("SELECT * FROM pending_tasks WHERE status = 'PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 1")
+    row = c.fetchone()
+
+    # If no PENDING_APPROVAL task exists, allow re-compiling the most recent task with new feedback
+    if not row:
+        c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 1")
+        row = c.fetchone()
+
+    if not row:
+        conn.close()
+        return "âš ï¸ No pending creative proposal found in memory. Give me a build directive first (e.g., `#argus create a website for ...`)."
+
+    task_data = dict(row)
+    conn.close()
+
+    t_id = task_data["task_id"]
+    objective = task_data["objective"]
+    dossier = task_data["research_dossier"]
+    proposal = task_data["creative_proposal"]
+    slug = task_data["artifact_slug"]
+
+    # Harvest additional targeted item photos so the compiler has rich visual URLs for every card
+    extra_media = tool_image_search(f"{objective} signature items products close up", count=8)
+
+    compiler_prompt = f"""
+    You are ARGUS's Master Full-Stack Frontend Synthesizer.
+    The user has APPROVED the Creative Proposal below. Your job is to write the COMPLETE, 100% original, production-ready HTML5 + Tailwind CSS + Vanilla JavaScript web application from scratch.
+
+    === ORIGINAL OBJECTIVE ===
+    {objective}
+
+    === LIVE RESEARCH DOSSIER (VERIFIED FACTS, ADDRESS, PHONE, HOURS, MENU/SERVICES, IMAGES) ===
+    {dossier[:10000]}
+
+    === SUPPLEMENTAL ITEM PHOTOGRAPHY URLS ===
+    {extra_media}
+
+    === APPROVED CREATIVE PROPOSAL ===
+    {proposal}
+
+    === USER CREATIVE FEEDBACK / OVERRIDES ===
+    {user_feedback if user_feedback else "Approved as proposed. Execute with maximum creative polish and zero generic placeholders."}
+
+    MANDATORY ZERO-TEMPLATE ENGINEERING STANDARDS:
+    1. BESPOKE VISUAL IDENTITY:
+       - Include `<script src="https://cdn.tailwindcss.com"></script>` and load the exact Google Fonts specified in the proposal.
+       - Apply the custom HEX color palette, border-radius aesthetic, and typography that match this exact business/project.
+    2. 100% AUTHENTIC CONTENT & PHOTOGRAPHY:
+       - Populate the hero, navigation, top status bar, and footer with the REAL street address, REAL phone number, REAL operating hours, and authentic policies discovered in the research dossier.
+       - Populate at least 6 to 9 real items/services/products with their real descriptions and prices.
+       - Every item card and hero banner MUST use a unique image URL from the research dossier or `https://tse2.mm.bing.net/th?q=URL_ENCODED_SPECIFIC_ITEM_NAME&w=900&h=650&c=7&rs=1&p=0`. Always attach an `onerror` handler to every `<img>` tag pointing to a Bing thumbnail proxy URL for that specific item so no broken image icon can ever render.
+    3. RICH CLIENT-SIDE INTERACTIVITY (PURE VANILLA JS):
+       - Multi-View Navigation: If the proposal calls for a 2-page or multi-view layout (e.g. Overview/Catalog, Reviews/Story, Hours/Location/Map, or Custom Calculator), implement smooth JavaScript tab/view switching in the sticky navbar.
+       - Live Search & Category Filtering: Include a working search input and category filter buttons that dynamically filter the item/service cards.
+       - Interactive Customization Modal & Slide-Over Drawer: Clicking any item/service opens a customization or booking modal (with real options/modifiers) and adds it to a slide-over Cart or Service Estimate/Appointment Drawer with live subtotal math and an interactive checkout/booking confirmation receipt.
+       - Embedded Map & Direct Inquiry Form: In the Location/Contact section, include an embedded Google Maps iframe (`https://www.google.com/maps?q=URL_ENCODED_ADDRESS&output=embed`) and a working inquiry form with instant toast feedback.
+    4. OUTPUT FORMAT:
+       - Output ONLY raw, valid HTML5 code starting with `<!DOCTYPE html>` and ending with `</html>`. Do NOT wrap in markdown explanations.
+    """
+
+    resp = groq_resilient_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an elite autonomous frontend compiler. Output ONLY raw, complete, self-contained HTML5/Tailwind/JS code starting with <!DOCTYPE html>."
+            },
+            {"role": "user", "content": compiler_prompt}
+        ],
+        temperature=0.35,
+        max_tokens=7000
+    )
+
+    compiled_html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
+
+    # Ensure valid HTML start
+    idx_doctype = compiled_html.lower().find("<!doctype html")
+    if idx_doctype > 0:
+        compiled_html = compiled_html[idx_doctype:]
+
+    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(compiled_html)
+
+    preview_url = f"{RENDER_EXTERNAL_URL}/preview/{slug}"
+    now = time.time()
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE pending_tasks SET status = 'COMPLETED', user_feedback = ?, updated_at = ? WHERE task_id = ?",
+        (user_feedback, now, t_id)
+    )
+    c.execute("SELECT version FROM generated_artifacts WHERE slug = ?", (slug,))
+    existing_art = c.fetchone()
+    ver = (existing_art["version"] + 1) if existing_art else 1
+
+    c.execute("""
+        INSERT OR REPLACE INTO generated_artifacts
+        (slug, title, artifact_type, objective, file_path, preview_url, version, design_notes, created_at, updated_at)
+        VALUES (?, ?, 'webapp', ?, ?, ?, ?, ?, ?, ?)
+    """, (slug, objective[:80], objective, file_path, preview_url, ver, user_feedback or "Approved Blueprint", now, now))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("jarvis_compile_approved_task", {"task_id": t_id, "slug": slug, "version": ver}, "SUCCESS", (time.time() - t0) * 1000)
+
+    return (
+        f"## ðŸš€ Bespoke Application Compiled & Deployed (`v{ver}`)\n"
+        f"- **Live URL:** [{preview_url}]({preview_url})\n"
+        f"- **Task ID:** `{t_id}`\n"
+        f"- **Creative Direction Applied:** `{user_feedback if user_feedback else 'Approved Research & Creative Blueprint'}`\n"
+        f"- **Local File:** `generated_demos/{slug}.html`\n\n"
+        f"ðŸ’¡ *Want to modify anything on the live site? Reply `#argus edit {slug}: <your changes>` or `#argus approve: <new styling notes>` to patch it in place.*"
+    )
+
+
+# =========================================================================================
+# SECTION 11: MASTER JARVIS REACT AGENT LOOP (HANDLES ALL GENERAL & MULTI-TOOL DIRECTIVES)
+# =========================================================================================
+
+def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> str:
+    """
+    Master Jarvis Orchestrator:
+    1. Routes Creative Approval / Revision commands (`#argus approve...`) to Phase 2 Compiler.
+    2. Routes Live Self-Editing commands (`#argus edit <slug>: ...`) to the Live HTML Patcher.
+    3. Routes Website / App / Creative Generation directives to Phase 1 Deep Research + Approval Gate
+       (or immediate execution if `#argus auto` is included).
+    4. Routes Executive Briefing requests directly to the multi-source Briefing Synthesizer.
+    5. Handles all other requests (Calendar, Gmail, Canvas, Deep Web Research, Memory, Coding)
+       through an autonomous multi-step Groq ReAct tool-calling loop.
+    """
+    clean_input = re.sub(r'^#?argus\b[:\s]*', '', user_input.strip(), flags=re.IGNORECASE).strip()
+    if not clean_input:
+        clean_input = "Give me a status report and executive briefing."
+
+    save_conversation_turn(session_id, "user", user_input)
+
+    low = clean_input.lower()
+
+    # --- ROUTE 1: CREATIVE APPROVAL GATE (`approve`, `greenlight`, `build it`, `ship it`) ---
+    if re.match(r'^(approve|greenlight|build\s+it|ship\s+it|confirm\s+build)\b', low):
+        feedback = re.sub(r'^(approve|greenlight|build\s+it|ship\s+it|confirm\s+build)[:\-\s]*', '', clean_input, flags=re.I).strip()
+        response_md = jarvis_compile_approved_task(user_feedback=feedback)
+        save_conversation_turn(session_id, "assistant", response_md)
+        return response_md
+
+    # --- ROUTE 2: LIVE SELF-PATCHING EDITOR (`edit <slug>: ...` or `update website <slug>...`) ---
+    edit_match = re.match(r'^(?:edit|patch|modify|revise)\s+([a-z0-9\-_]+)[:\-\s]+(.+)$', clean_input, flags=re.I | re.DOTALL)
+    if edit_match:
+        target_slug = edit_match.group(1).strip()
+        mod_notes = edit_match.group(2).strip()
+        response_md = tool_patch_existing_webapp(target_slug, mod_notes)
+        save_conversation_turn(session_id, "assistant", response_md)
+        return response_md
+
+    # --- ROUTE 3: WEBSITE / WEBAPP / DEMO RESEARCH & CREATIVE PROPOSAL ENGINE ---
+    is_web_build = any(
+        phrase in low for phrase in [
+            "create a demo website", "create a website", "build a website", "make a website",
+            "generate a website", "demo site", "web app for", "landing page for", "create a site"
+        ]
+    )
+    if is_web_build:
+        auto_flag = any(flag in low for flag in ["--auto", "auto mode", "skip approval", "build immediately"])
+        response_md = jarvis_autonomous_research_and_propose(clean_input, auto_execute=auto_flag)
+        save_conversation_turn(session_id, "assistant", response_md)
+        return response_md
+
+    # --- ROUTE 4: DIRECT EXECUTIVE BRIEFING ---
+    if any(p in low for p in ["executive briefing", "morning briefing", "daily briefing", "status report"]):
+        response_md = generate_executive_briefing(DEFAULT_LOCATION)
+        save_conversation_turn(session_id, "assistant", response_md)
+        return response_md
+
+    # --- ROUTE 5: GENERAL AUTONOMOUS MULTI-TOOL REACT AGENT ---
+    history = get_recent_conversation(session_id, limit=8)
+    known_facts = query_knowledge_graph(limit=15)
+
+    system_prompt = (
+        "You are ARGUS v4.0, a Jarvis-class Autonomous Executive AI Assistant built for Kyle Wilson "
+        "(M.S. Computer Science student at Temple University, Data Science & ML researcher, Campus Recreation Supervisor in Philadelphia).\n"
+        "You have full access to live tools:\n"
+        "- `web_search`, `read_webpage`, `image_search` for live internet & academic research\n"
+        "- `upsert_knowledge_fact` to permanently store facts in your SQLite Knowledge Graph\n"
+        "- `calendar_list_events`, `calendar_add_event`, `calendar_delete_event` for schedule management\n"
+        "- `gmail_read_inbox`, `gmail_send_or_draft` for email communications\n"
+        "- `canvas_sync_and_summary`, `canvas_add_local_item` for Temple University Canvas coursework tracking\n"
+        "- `executive_briefing` for comprehensive daily briefings\n"
+        "- `patch_existing_webapp`, `list_generated_demos` for managing deployed web applications\n\n"
+        f"CURRENT KNOWN FACTS IN MEMORY:\n{json.dumps(known_facts, indent=2)}\n\n"
+        "Always take autonomous action using your tools when information or state changes are needed, "
+        "and deliver clear, well-structured Markdown responses."
+    )
+
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for h in history[:-1]:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": clean_input})
+
+    final_reply = ""
+    for step in range(5):
+        try:
+            resp = groq_resilient_completion(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=3000,
+                tools=JARVIS_TOOL_DECLARATIONS,
+                tool_choice="auto"
+            )
+            msg = resp.choices[0].message
+            if not getattr(msg, "tool_calls", None):
+                final_reply = clean_llm_text(msg.content or "")
+                break
+
+            messages.append(msg)
+            for tc in msg.tool_calls:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments)
+                except Exception:
+                    fn_args = {}
+                tool_result = execute_jarvis_tool_call(fn_name, fn_args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": fn_name,
+                    "content": tool_result[:5000]
+                })
+        except Exception as e:
+            print(f"[ARGUS ReAct Step {step+1} Fallback]: {e}")
+            # Fallback to direct web-grounded completion if a model rejects tool schema
+            web_ctx = tool_web_search(clean_input, max_results=5)
+            fallback_resp = groq_resilient_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"User Request: {clean_input}\n\nLive Web Context:\n{web_ctx}"}
+                ],
+                temperature=0.3,
+                max_tokens=2500
+            )
+            final_reply = clean_llm_text(fallback_resp.choices[0].message.content)
+            break
+
+    if not final_reply:
+        synth = groq_resilient_completion(
+            messages=messages + [{"role": "user", "content": "Provide your complete final response based on the tool outputs above."}],
+            temperature=0.3,
+            max_tokens=2500
+        )
+        final_reply = clean_llm_text(synth.choices[0].message.content)
+
+    save_conversation_turn(session_id, "assistant", final_reply)
+    return final_reply
+
+
+# =========================================================================================
+# SECTION 12: FASTAPI APPLICATION, AUTHENTICATION & REQUEST SCHEMAS
+# =========================================================================================
+
+app = FastAPI(
+    title="ARGUS OS v4.0 â€” Autonomous Jarvis Executive & Creative Engine",
+    description="Multi-Agent Deep Research, Human-in-the-Loop Creative Web/Code Compiler, Canvas LMS, Gmail, Calendar & Executive Briefing OS",
+    version=APP_VERSION
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -134,2942 +1852,450 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
-@app.exception_handler(Exception)
-async def global_cors_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal server error: {str(exc)}"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
-    )
 
-@app.options("/{rest_of_path:path}")
-async def cors_preflight_handler(rest_of_path: str):
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE, PUT",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
-        }
-    )
+class ChatRequest(BaseModel):
+    message: Optional[str] = None
+    prompt: Optional[str] = None
+    directive: Optional[str] = None
+    text: Optional[str] = None
+    session_id: Optional[str] = "default"
+    auto_approve: Optional[bool] = False
 
-@app.get("/favicon.ico")
-async def favicon():
-    return Response(status_code=204)
 
-def discover_and_scrape_official_site(business_name: str, location: str) -> Dict[str, Any]:
+class ApprovalRequest(BaseModel):
+    task_id: Optional[str] = None
+    feedback: Optional[str] = ""
+
+
+class PatchRequest(BaseModel):
+    slug: str
+    instructions: str
+
+
+class CalendarEventCreate(BaseModel):
+    title: str
+    start_time: str
+    end_time: str
+    location: Optional[str] = ""
+    description: Optional[str] = ""
+
+
+class EmailDispatchRequest(BaseModel):
+    recipient: str
+    subject: str
+    body: str
+    send_immediately: Optional[bool] = False
+
+
+class CanvasItemCreate(BaseModel):
+    course_name: str
+    title: str
+    due_at: str
+    points: Optional[float] = 100.0
+    description: Optional[str] = ""
+
+
+def verify_optional_bearer(authorization: Optional[str] = Header(None)) -> bool:
     """
-    Finds the business's actual website URL via DuckDuckGo/Yahoo/Bing HTML search,
-    then crawls their real homepage and about/contact pages for exact text and real images.
+    Soft bearer verification: validates ARGUS_BEARER_TOKEN if provided,
+    but never crashes browser dashboard or webhook requests.
     """
-    discovered_urls = []
-    real_site_images = []
-    scraped_pages_text = []
+    if not authorization:
+        return True
+    token = authorization.replace("Bearer ", "").strip()
+    if token and token != ARGUS_BEARER_TOKEN:
+        print(f"[Auth Notice] Non-matching bearer token received: {token[:8]}...")
+    return True
 
-    directory_domains = [
-        "yelp.com", "yellowpages.com", "facebook.com", "instagram.com", "tripadvisor.com",
-        "mapquest.com", "foursquare.com", "bbb.org", "angi.com", "thumbtack.com",
-        "simpletire.com", "surecritic.com", "google.com", "bing.com", "duckduckgo.com", "yahoo.com"
-    ]
 
-    # 1. Search via DuckDuckGo Lite / HTML to find official website URL & directory snippets
-    queries = [
-        f"{business_name} {location} official site",
-        f"{business_name} {location} address phone hours services"
-    ]
+# =========================================================================================
+# SECTION 13: FASTAPI ROUTES (CHAT, APPROVALS, BRIEFING, CALENDAR, GMAIL, CANVAS, DEMOS)
+# =========================================================================================
 
-    for q in queries:
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(q, max_results=6))
-                for r in results:
-                    href = r.get("href", "")
-                    title = r.get("title", "")
-                    body = r.get("body", "")
-                    if body:
-                        scraped_pages_text.append(f"SOURCE [{title} - {href}]: {body}")
-                    if href and href.startswith("http"):
-                        if not any(d in href.lower() for d in directory_domains):
-                            if href not in discovered_urls:
-                                discovered_urls.append(href)
-        except Exception as e:
-            print(f"DDGS search warning: {e}")
-
-        # Backup HTML search via Yahoo Search (rarely blocks Render IPs)
-        try:
-            clean_q = urllib.parse.quote(q)
-            y_url = f"https://search.yahoo.com/search?p={clean_q}"
-            req = urllib.request.Request(
-                y_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
-            )
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                y_html = resp.read().decode("utf-8", errors="ignore")
-            
-            # Extract organic snippets from Yahoo results
-            clean_y = re.sub(r'<script.*?</script>', ' ', y_html, flags=re.DOTALL)
-            clean_y = re.sub(r'<style.*?</style>', ' ', clean_y, flags=re.DOTALL)
-            snippets = re.findall(r'<div[^>]*class="[^"]*compText[^"]*"[^>]*>(.*?)</div>', clean_y)
-            for s in snippets[:6]:
-                txt = re.sub(r'<[^>]+>', ' ', s).strip()
-                if len(txt) > 30:
-                    scraped_pages_text.append(f"WEB SNIPPET: {txt}")
-
-            # Extract candidate official URLs
-            links = re.findall(r'href="(https?://[^"]+)"', y_html)
-            for lnk in links:
-                if not any(d in lnk.lower() for d in directory_domains + ["yahoo.com", "yimg.com", "bing.com"]):
-                    if lnk not in discovered_urls:
-                        discovered_urls.append(lnk)
-        except Exception as y_err:
-            print(f"Yahoo backup search warning: {y_err}")
-
-    # 2. Directly Crawl the Official Business Website (if discovered)
-    official_domain = None
-    for target_url in discovered_urls[:2]:
-        try:
-            print(f"[ARGUS Crawler] Crawling official business website: {target_url}")
-            req = urllib.request.Request(
-                target_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            )
-            with urllib.request.urlopen(req, timeout=7) as resp:
-                site_html = resp.read().decode("utf-8", errors="ignore")
-
-            parsed_uri = urllib.parse.urlparse(target_url)
-            base_origin = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
-            if not official_domain:
-                official_domain = base_origin
-
-            # Extract real images from the business's own website (og:image + <img> tags)
-            og_imgs = re.findall(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', site_html, re.I)
-            raw_imgs = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', site_html, re.I)
-
-            for img_src in (og_imgs + raw_imgs):
-                full_img = urllib.parse.urljoin(base_origin, img_src.strip())
-                low = full_img.lower()
-                if full_img.startswith("http") and any(ext in low for ext in [".jpg", ".jpeg", ".png", ".webp"]):
-                    if not any(skip in low for skip in ["spacer", "1x1", "pixel", "facebook", "twitter", "yelp", "icon", "svg", "spinner", "loader"]):
-                        if full_img not in real_site_images:
-                            real_site_images.append(full_img)
-
-            # Strip HTML tags to get pure visible text from the business's homepage
-            body_clean = re.sub(r'<script.*?</script>', ' ', site_html, flags=re.DOTALL | re.I)
-            body_clean = re.sub(r'<style.*?</style>', ' ', body_clean, flags=re.DOTALL | re.I)
-            visible_text = re.sub(r'<[^>]+>', ' ', body_clean)
-            visible_text = re.sub(r'\s+', ' ', visible_text).strip()
-            if len(visible_text) > 100:
-                scraped_pages_text.insert(0, f"OFFICIAL WEBSITE ({target_url}) CONTENT: {visible_text[:3000]}")
-        except Exception as crawl_err:
-            print(f"Direct crawl warning for {target_url}: {crawl_err}")
-
-    corpus = "\n".join(scraped_pages_text)
+@app.get("/health")
+async def health_check():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) AS cnt FROM generated_artifacts")
+    demos_cnt = c.fetchone()["cnt"]
+    c.execute("SELECT COUNT(*) AS cnt FROM pending_tasks WHERE status = 'PENDING_APPROVAL'")
+    pending_cnt = c.fetchone()["cnt"]
+    conn.close()
     return {
-        "corpus": corpus,
-        "official_url": official_domain,
-        "real_site_images": real_site_images
+        "status": "online",
+        "version": APP_VERSION,
+        "active_models": get_available_groq_models()[:4],
+        "deployed_demos": demos_cnt,
+        "pending_approvals": pending_cnt,
+        "timestamp": datetime.datetime.now().isoformat()
     }
 
 
-def perplexity_deep_research(business_name: str, location: str, niche: str) -> Dict[str, Any]:
+@app.post("/chat")
+@app.post("/api/chat")
+@app.post("/directive")
+@app.post("/command")
+async def chat_endpoint(req: Request, body: Optional[ChatRequest] = None, _auth: bool = Depends(verify_optional_bearer)):
     """
-    Stage 1: Deep Web + Official Website Research.
-    Extracts verified street address, phone, hours, real offerings, and actual website images.
+    Universal command & chat endpoint. Accepts JSON payloads (`message`, `prompt`, `directive`, `text`)
+    or raw form/text bodies and returns the autonomous Jarvis response.
     """
-    crawl_data = discover_and_scrape_official_site(business_name, location)
-    corpus = crawl_data.get("corpus", "")
+    user_input = ""
+    session_id = "default"
 
-    # Deterministic Regex Extraction of Real Phone & Street Address from the live corpus
-    phone_matches = re.findall(r'\(\d{3}\)\s*\d{3}[-.\s]\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b', corpus)
-    # Filter out generic toll-free directory numbers
-    real_phone = next((p for p in phone_matches if not p.startswith(("800", "888", "877", "(800", "(888"))), None)
+    if body:
+        user_input = body.message or body.prompt or body.directive or body.text or ""
+        session_id = body.session_id or "default"
 
-    addr_match = re.search(
-        r'\b\d{1,5}\s+[A-Z0-9][a-zA-Z0-9\.\-\s]{2,28}(?:Ave|Avenue|St|Street|Rd|Road|Blvd|Boulevard|Pkwy|Pike|Dr|Drive|Ln|Lane|Way)\b\.?(?:,?\s*Philadelphia,?\s*PA\s*\d{5}?)?',
-        corpus,
-        re.IGNORECASE
-    )
-    real_address = addr_match.group(0).strip() if addr_match else location
+    if not user_input:
+        try:
+            raw_json = await req.json()
+            if isinstance(raw_json, dict):
+                user_input = (
+                    raw_json.get("message")
+                    or raw_json.get("prompt")
+                    or raw_json.get("directive")
+                    or raw_json.get("text")
+                    or raw_json.get("query")
+                    or ""
+                )
+                session_id = raw_json.get("session_id", "default")
+        except Exception:
+            raw_bytes = await req.body()
+            user_input = raw_bytes.decode("utf-8", errors="ignore").strip()
 
-    return {
-        "corpus": corpus if corpus else f"{business_name} in {location}",
-        "verified_phone": real_phone,
-        "verified_address": real_address,
-        "official_url": crawl_data.get("official_url"),
-        "real_site_images": crawl_data.get("real_site_images", [])
-    }
+    if not user_input:
+        raise HTTPException(status_code=400, detail="No message or directive provided.")
 
-def harvest_targeted_media(
-    business_name: str,
-    location: str,
-    items: List[Dict[str, Any]],
-    hero_query: str,
-    real_site_images: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """
-    Stage 2B: Uses actual photos from the company's website and business-specific image search first.
-    """
-    real_site_images = real_site_images or []
-    bad_tokens = [".svg", "logo", "icon", "favicon", "1x1", "map", "avatar", "badge"]
-
-    # Harvest business-specific photos from DDGS Images (e.g. "Mid City Tire and Auto 709 Washington Ave Philadelphia")
-    biz_specific_photos = list(real_site_images)
     try:
-        with DDGS() as ddgs:
-            biz_results = list(ddgs.images(f'"{business_name}" {location}', max_results=8))
-            for r in biz_results:
-                url = r.get("image", "")
-                if url.startswith("http") and not any(b in url.lower() for b in bad_tokens):
-                    if url not in biz_specific_photos:
-                        biz_specific_photos.append(url)
+        reply_md = run_jarvis_executive_agent(user_input=user_input, session_id=session_id)
+        return {
+            "status": "success",
+            "response": reply_md,
+            "reply": reply_md,
+            "message": reply_md,
+            "output": reply_md
+        }
     except Exception as e:
-        print(f"Business-specific photo search warning: {e}")
+        tb = traceback.format_exc()
+        print(f"[ARGUS Chat Endpoint Error]: {e}\n{tb}")
+        log_audit_event("chat_endpoint_error", {"input": user_input, "error": str(e)}, "ERROR")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "error_recovered",
+                "response": f"âš ï¸ **ARGUS Diagnostic Notice:** `{str(e)}`\n\nPlease retry or check your `GROQ_API_KEY` in Render Environment.",
+                "reply": f"âš ï¸ **ARGUS Diagnostic Notice:** `{str(e)}`"
+            }
+        )
 
-    def fetch_item_image(q: str, fallback_idx: int) -> str:
-        # Try finding a photo specifically matching the business + item first
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.images(q, max_results=4))
-                for r in results:
-                    url = r.get("image", "")
-                    if url.startswith("http") and not any(b in url.lower() for b in bad_tokens):
-                        return url
-        except Exception as e:
-            print(f"Item media warning for '{q}': {e}")
 
-        # Fallback to real photos scraped from the company's actual website / business listing
-        if biz_specific_photos:
-            return biz_specific_photos[fallback_idx % len(biz_specific_photos)]
-        return "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80"
+@app.post("/api/approve")
+async def approve_task_endpoint(req: ApprovalRequest):
+    """Triggers Phase 2 compilation for a pending creative proposal."""
+    result_md = jarvis_compile_approved_task(task_id=req.task_id, user_feedback=req.feedback or "")
+    return {"status": "success", "response": result_md}
 
-    # Hero image is ALWAYS the #1 real photo from the company's website or business listing if available
-    if biz_specific_photos:
-        hero_img = biz_specific_photos[0]
-    else:
-        hero_img = fetch_item_image(f"{business_name} {location} {hero_query}", 0)
 
-    enriched_items = []
-    for idx, item in enumerate(items):
-        item_name = item.get("name", "")
-        # Prioritize real company website photos if we harvested enough, otherwise search specific item
-        if idx + 1 < len(real_site_images):
-            item["image_url"] = real_site_images[idx + 1]
+@app.post("/api/patch")
+async def patch_demo_endpoint(req: PatchRequest):
+    """Applies live self-healing edits to an existing deployed website."""
+    result_md = tool_patch_existing_webapp(slug=req.slug, modification_instructions=req.instructions)
+    return {"status": "success", "response": result_md}
+
+
+@app.get("/briefing")
+@app.get("/api/briefing")
+async def briefing_endpoint(location: str = Query(DEFAULT_LOCATION)):
+    """Returns the full Executive Daily Briefing."""
+    report = generate_executive_briefing(location=location)
+    return {"status": "success", "briefing": report, "response": report}
+
+
+@app.get("/api/calendar")
+async def get_calendar_endpoint(days: int = 14):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM calendar_events WHERE status != 'cancelled' ORDER BY start_time ASC LIMIT 50")
+    events = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"status": "success", "events": events, "summary": tool_calendar_list_events(days=days)}
+
+
+@app.post("/api/calendar")
+async def create_calendar_endpoint(ev: CalendarEventCreate):
+    msg = tool_calendar_add_event(ev.title, ev.start_time, ev.end_time, ev.location or "", ev.description or "")
+    return {"status": "success", "message": msg}
+
+
+@app.get("/api/canvas")
+async def get_canvas_endpoint():
+    summary = tool_canvas_sync_and_summary()
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM canvas_items ORDER BY due_at ASC LIMIT 40")
+    items = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"status": "success", "items": items, "summary": summary}
+
+
+@app.post("/api/canvas")
+async def add_canvas_item_endpoint(item: CanvasItemCreate):
+    msg = tool_canvas_add_local_item(item.course_name, item.title, item.due_at, item.points or 100.0, item.description or "")
+    return {"status": "success", "message": msg}
+
+
+@app.get("/api/gmail")
+async def get_gmail_endpoint(max_emails: int = 10):
+    summary = tool_gmail_read_inbox(max_emails=max_emails)
+    return {"status": "success", "summary": summary}
+
+
+@app.post("/api/gmail")
+async def send_gmail_endpoint(req: EmailDispatchRequest):
+    msg = tool_gmail_send_or_draft(req.recipient, req.subject, req.body, bool(req.send_immediately))
+    return {"status": "success", "message": msg}
+
+
+@app.get("/api/memory")
+async def get_memory_endpoint(q: str = ""):
+    facts = query_knowledge_graph(search_term=q, limit=50)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 15")
+    tasks = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"status": "success", "facts": facts, "tasks": tasks}
+
+
+@app.get("/preview/{slug}", response_class=HTMLResponse)
+async def preview_generated_website(slug: str):
+    """Serves the compiled standalone HTML application for any generated demo."""
+    clean_slug = re.sub(r'[^a-z0-9\-]', '', slug.lower())
+    file_path = os.path.join(DEMO_DIR, f"{clean_slug}.html")
+
+    if not os.path.exists(file_path):
+        # Fuzzy match if user typed partial slug
+        matches = [f for f in os.listdir(DEMO_DIR) if f.endswith(".html") and clean_slug in f]
+        if matches:
+            file_path = os.path.join(DEMO_DIR, matches[0])
         else:
-            img_q = item.get("image_query") or f"{business_name} {location} {item_name}"
-            item["image_url"] = fetch_item_image(img_q, idx + 1)
-        enriched_items.append(item)
-
-    return {"hero_image": hero_img, "items": enriched_items}
-
-def get_available_groq_models() -> List[str]:
-    """Dynamically queries Groq API for currently active text-generation models on your account."""
-    models = []
-    if groq_client:
-        try:
-            model_list = groq_client.models.list()
-            for m in model_list.data:
-                m_id = m.id
-                # Exclude audio/whisper, guard, vision-only, or embedding models
-                if not any(skip in m_id.lower() for skip in ["whisper", "guard", "tts", "embed", "vision"]):
-                    models.append(m_id)
-        except Exception as e:
-            print(f"Dynamic model discovery warning: {e}")
-
-    # Prioritize high-capability models if present in the active account list
-    preferred = [
-        os.getenv("GROQ_MODEL", ""),
-        "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it"
-    ]
-    ordered = [m for m in preferred if m and m in models]
-    for m in models:
-        if m not in ordered:
-            ordered.append(m)
-
-    return ordered if ordered else ["llama-3.3-70b-versatile"]
-
-
-def build_deterministic_blueprint(business_name: str, niche: str, location: str, research_corpus: str) -> Dict[str, Any]:
-    """
-    Zero-LLM deterministic synthesis fallback.
-    Parses the live scraped web research to build an industry-accurate blueprint so generation never 500s.
-    """
-    combined = f"{business_name} {niche} {research_corpus}".lower()
-
-    is_auto = any(w in combined for w in ["tire", "auto", "mechanic", "brake", "oil", "repair", "inspection", "collision", "body shop"])
-    is_medical_grooming = any(w in combined for w in ["dental", "dentist", "clinic", "medical", "doctor", "barber", "salon", "spa", "hair", "law"])
-    is_pizza_ital = any(w in combined for w in ["pizza", "pizzeria", "steak", "cheesesteak", "hoagie", "cutlet", "italian", "bakery", "deli"])
-
-    # At the top of build_deterministic_blueprint:
-    phone_matches = re.findall(r'\(\d{3}\)\s*\d{3}[-.\s]\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b', research_corpus)
-    extracted_phone = next((p for p in phone_matches if "555" not in p and not p.startswith(("800", "888"))), "(215) 339-9441")
-
-    addr_match = re.search(
-        r'\b\d{1,5}\s+[A-Z0-9][a-zA-Z0-9\.\-\s]{2,28}(?:Ave|Avenue|St|Street|Rd|Road|Blvd|Pike)\b\.?(?:,?\s*Philadelphia,?\s*PA\s*\d{5}?)?',
-        research_corpus,
-        re.IGNORECASE
-    )
-    extracted_address = addr_match.group(0).strip() if addr_match else location
-
-    if is_auto:
-        return {
-            "business_name": business_name,
-            "niche_subtitle": f"Certified Automotive & Tire Center • {location}",
-            "interaction_mode": "service_booking",
-            "hero_headline": f"Precision Auto Care & Tire Service at {business_name}",
-            "hero_subheadline": f"Trusted in {location} for computerized diagnostics, PA state inspections, brake overhauls, and high-speed tire mounting.",
-            "hero_image_query": "modern automotive mechanic service bay garage",
-            "primary_cta": "Book Service Bay",
-            "drawer_title": "Service Estimate & Bay Booking",
-            "checkout_button_text": "Confirm Service Appointment",
-            "theme": {
-                "mode": "dark",
-                "bg_primary": "#090d16",
-                "bg_secondary": "#111827",
-                "text_primary": "#f9fafb",
-                "text_secondary": "#9ca3af",
-                "accent_primary": "#ea580c",
-                "accent_secondary": "#c2410c",
-                "heading_font": "Space Grotesk",
-                "body_font": "Inter",
-                "border_radius": "0.5rem"
-            },
-            "contact_info": {
-                "address": extracted_address,
-                "phone": extracted_phone,
-                "hours": "Mon - Sat: 8:00 AM - 6:00 PM",
-                "policy_badge": "PA State Inspection Station • Same-Day Tire & Brake Service"
-            },
-            "categories": ["Tires & Alignment", "Brakes & Suspension", "Maintenance & Inspections"],
-            "items": [
-                {"id": "1", "name": "PA State Safety & Emissions Inspection", "category": "Maintenance & Inspections", "price": 75.00, "price_label": "$75.00", "badge": "Required Annual", "description": "Complete Pennsylvania DOT safety check and OBD-II emissions certification.", "options": ["Need Sticker Renewal", "Include Wiper Check", "Drop-off Early Morning"], "image_query": "mechanic car inspection lift"},
-                {"id": "2", "name": "4-Tire Mount, High-Speed Balance & Install", "category": "Tires & Alignment", "price": 89.00, "price_label": "$89.00", "badge": "Most Popular", "description": "Precision mounting, laser wheel balancing, new valve stems, and torque calibration.", "options": ["All-Season Tires", "Performance Tires", "Add TPMS Reset"], "image_query": "car tire mounting wheel balance machine"},
-                {"id": "3", "name": "Ceramic Brake Pad & Rotor Overhaul", "category": "Brakes & Suspension", "price": 219.00, "price_label": "From $219.00", "badge": "Safety Special", "description": "Heavy-duty ceramic brake pads, machined or new rotors, caliper lubrication, and fluid check.", "options": ["Front Axle", "Rear Axle", "Full 4-Wheel Service"], "image_query": "car disc brake rotor caliper close up"},
-                {"id": "4", "name": "Laser Four-Wheel Alignment", "category": "Tires & Alignment", "price": 109.00, "price_label": "$109.00", "badge": "Precision", "description": "Computerized camber, caster, and toe adjustment to stop uneven tire wear and steering pull.", "options": ["Standard Alignment", "SUV / Light Truck"], "image_query": "wheel alignment laser sensor car"},
-                {"id": "5", "name": "Full Synthetic Oil & Filter Service", "category": "Maintenance & Inspections", "price": 69.99, "price_label": "$69.99", "badge": "Quick Lube", "description": "Up to 5 quarts of full synthetic motor oil, OEM filter replacement, and 25-point inspection.", "options": ["5W-30 Synthetic", "0W-20 Synthetic", "High-Mileage Formula"], "image_query": "pouring synthetic motor oil engine"},
-                {"id": "6", "name": "Computerized Engine & Electrical Diagnostics", "category": "Maintenance & Inspections", "price": 95.00, "price_label": "$95.00", "badge": "Check Engine", "description": "Full OBD-II fault code readout, live sensor telemetry, battery/alternator load testing.", "options": ["Check Engine Light", "Battery / Starting Issue", "Strange Noise"], "image_query": "automotive diagnostic scanner tool mechanic"}
-            ],
-            "reviews": [
-                {"author": "Marcus T.", "rating": "5.0", "text": f"Honest pricing and fast turnaround at {business_name}. Got my tires mounted and state inspection done in under two hours."},
-                {"author": "Elena R.", "rating": "5.0", "text": "No upsell nonsense. They showed me the exact brake wear before replacing the pads and rotors."},
-                {"author": "David K.", "rating": "4.9", "text": f"Best shop in {location}. Always reliable for alignments and quick oil changes."}
-            ]
-        }
-
-    if is_medical_grooming:
-        return {
-            "business_name": business_name,
-            "niche_subtitle": f"Premier Care & Appointments • {location}",
-            "interaction_mode": "service_booking",
-            "hero_headline": f"Elevated Care & Personal Attention at {business_name}",
-            "hero_subheadline": f"Serving {location} with tailored appointments, modern techniques, and dedicated client care.",
-            "hero_image_query": f"{niche} modern studio interior clean",
-            "primary_cta": "Book Appointment",
-            "drawer_title": "Your Appointment Request",
-            "checkout_button_text": "Confirm Booking Slot",
-            "theme": {
-                "mode": "light",
-                "bg_primary": "#f8fafc",
-                "bg_secondary": "#ffffff",
-                "text_primary": "#0f172a",
-                "text_secondary": "#475569",
-                "accent_primary": "#0284c7",
-                "accent_secondary": "#0369a1",
-                "heading_font": "Plus Jakarta Sans",
-                "body_font": "DM Sans",
-                "border_radius": "1rem"
-            },
-            "contact_info": {
-                "address": location,
-                "phone": extracted_phone,
-                "hours": "Mon - Sat: 9:00 AM - 7:00 PM",
-                "policy_badge": "Accepting New Clients • Online Booking Available"
-            },
-            "categories": ["Signature Services", "Consultations", "Packages"],
-            "items": [
-                {"id": "1", "name": "Signature Full Session", "category": "Signature Services", "price": 65.00, "price_label": "$65.00", "badge": "Most Popular", "description": "Complete personalized session tailored to your exact preferences and goals.", "options": ["Morning Slot", "Afternoon Slot", "Senior Specialist"], "image_query": f"{niche} professional service close up"},
-                {"id": "2", "name": "Comprehensive New Client Consultation", "category": "Consultations", "price": 45.00, "price_label": "$45.00", "badge": "First Visit", "description": "Thorough evaluation, custom care roadmap, and initial treatment.", "options": ["First-Time Visit", "Include Follow-Up Plan"], "image_query": f"{niche} consultation modern office"},
-                {"id": "3", "name": "Executive Refresh Package", "category": "Packages", "price": 110.00, "price_label": "$110.00", "badge": "Premium", "description": "Extended multi-step treatment with premium products and priority scheduling.", "options": ["Standard Package", "Add Express Upgrade"], "image_query": f"{niche} luxury treatment equipment"}
-            ],
-            "reviews": [
-                {"author": "Sarah M.", "rating": "5.0", "text": f"Spotless environment and incredible attention to detail at {business_name}."},
-                {"author": "James L.", "rating": "5.0", "text": "Booking was effortless and the staff took the time to get everything right."},
-                {"author": "Chloe W.", "rating": "5.0", "text": f"My go-to spot in {location}. Consistently top-tier service."}
-            ]
-        }
-
-    # Default / Culinary & Hospitality Blueprint
-    return {
-        "business_name": business_name,
-        "niche_subtitle": f"Artisan Kitchen & Local Favorite • {location}",
-        "interaction_mode": "cart_order",
-        "hero_headline": f"Handcrafted Daily at {business_name}",
-        "hero_subheadline": f"Famous across {location} for house-baked seeded rolls, slow-simmered sauces, and made-to-order specialties.",
-        "hero_image_query": f"{business_name} {location} pizza cheesesteak food close up",
-        "primary_cta": "Start Pickup Order",
-        "drawer_title": "Your Pickup Bag",
-        "checkout_button_text": "Send Order to Kitchen",
-        "theme": {
-            "mode": "dark",
-            "bg_primary": "#0c0a09",
-            "bg_secondary": "#1c1917",
-            "text_primary": "#fafaf9",
-            "text_secondary": "#a8a29e",
-            "accent_primary": "#d97706",
-            "accent_secondary": "#b45309",
-            "heading_font": "Syne",
-            "body_font": "Inter",
-            "border_radius": "0.85rem"
-        },
-        "contact_info": {
-            "address": location,
-            "phone": extracted_phone,
-            "hours": "Tue - Sun: 11:00 AM - 9:00 PM",
-            "policy_badge": "Fresh Baked Seeded Bread • Made to Order"
-        },
-        "categories": ["Signature Pies", "Steaks & Cutlets", "Hoagies & Sides"],
-        "items": [
-            {"id": "1", "name": "Cooper Sharp Ribeye Cheesesteak", "category": "Steaks & Cutlets", "price": 16.50, "price_label": "$16.50", "badge": "House Legend", "description": "Thinly sliced ribeye steak with melted Cooper Sharp cheese and caramelized onions on a fresh-baked seeded roll.", "options": ["Fried Onions", "Raw Onions", "Long Hots (+$1.50)", "Extra Cooper Sharp"], "image_query": "philly cheesesteak cooper sharp seeded roll close up"},
-            {"id": "2", "name": "Grandma Square Pan Pie", "category": "Signature Pies", "price": 23.00, "price_label": "$23.00", "badge": "Best Seller", "description": "Crisp olive-oil pan crust topped with crushed San Marzano tomatoes, fresh mozzarella, roasted garlic, and sweet basil.", "options": ["Well Done Crust", "Add Cup & Char Pepperoni", "Hot Honey Drizzle"], "image_query": "square grandma pizza fresh basil mozzarella close up"},
-            {"id": "3", "name": "Chicken Cutlet Italiano", "category": "Steaks & Cutlets", "price": 16.00, "price_label": "$16.00", "badge": "Local Favorite", "description": "Hand-breaded chicken breast cutlet with garlic-sautéed broccoli rabe and aged sharp provolone on seeded bread.", "options": ["Add Roasted Red Peppers", "Long Hots", "Balsamic Glaze"], "image_query": "italian chicken cutlet broccoli rabe sandwich roll"},
-            {"id": "4", "name": "Upside-Down Trenton Tomato Pie", "category": "Signature Pies", "price": 22.00, "price_label": "$22.00", "badge": "Artisan Bake", "description": "Sliced mozzarella baked directly on the deck crust, ladled with chunky herb crushed tomatoes and pecorino romano.", "options": ["Classic Plain", "Add Sweet Italian Sausage", "Extra Pecorino"], "image_query": "upside down tomato pie pizza artisan crust"},
-            {"id": "5", "name": "Old-World Italian Hoagie", "category": "Hoagies & Sides", "price": 15.50, "price_label": "$15.50", "badge": "Deli Classic", "description": "Imported prosciutto di Parma, hot capicola, Genoa salami, and sharp provolone with shredded lettuce, tomato, and oregano oil.", "options": ["Sweet Peppers", "Hot Cherry Peppers", "Extra Oil & Vinegar"], "image_query": "italian hoagie sub cold cuts seeded roll"},
-            {"id": "6", "name": "Crispy Garlic Herb Fries", "category": "Hoagies & Sides", "price": 6.50, "price_label": "$6.50", "badge": "Hot Side", "description": "Double-cooked russet fries tossed in sea salt, cracked black pepper, and grated aged parmesan.", "options": ["Side of Cheese Whiz", "Side of Marinara"], "image_query": "crispy parmesan garlic french fries close up"}
-        ],
-        "reviews": [
-            {"author": "Gianna P.", "rating": "5.0", "text": f"The seeded bread at {business_name} is unmatched. Best Cooper Sharp steak and Grandma pie in {location}."},
-            {"author": "Mike D.", "rating": "5.0", "text": "Worth every minute of the wait. The crust has the perfect char and crunch."},
-            {"author": "Tasha R.", "rating": "5.0", "text": "Chicken cutlet with broccoli rabe and sharp provolone is an absolute 10/10."}
-        ]
-    }
-
-
-def synthesize_business_blueprint(business_name: str, niche: str, location: str, research_corpus: str) -> Dict[str, Any]:
-    """
-    Stage 2A: Queries active Groq models dynamically, and falls back to deterministic synthesis so it never crashes.
-    """
-    prompt = f"""
-    You are an autonomous business intelligence and brand synthesis engine.
-    Analyze the following live web research for "{business_name}" ({niche}) in "{location}":
-
-    LIVE WEB RESEARCH CORPUS:
-    {research_corpus[:3200]}
-
-    RETURN ONLY VALID JSON matching this exact structure (with 6 real items/services):
-    {{
-      "business_name": "{business_name}",
-      "niche_subtitle": "Descriptive category",
-      "interaction_mode": "cart_order" | "service_booking",
-      "hero_headline": "Bold headline tailored to the business",
-      "hero_subheadline": "15-25 word value proposition grounded in research",
-      "hero_image_query": "Search query for hero image",
-      "primary_cta": "e.g., 'Start Pickup Order' or 'Book Service Bay'",
-      "drawer_title": "e.g., 'Your Pickup Order' or 'Service Estimate & Booking'",
-      "checkout_button_text": "e.g., 'Submit Order' or 'Confirm Appointment'",
-      "theme": {{
-        "mode": "dark" | "light",
-        "bg_primary": "#0c0a09",
-        "bg_secondary": "#1c1917",
-        "text_primary": "#fafaf9",
-        "text_secondary": "#a8a29e",
-        "accent_primary": "#ea580c",
-        "accent_secondary": "#c2410c",
-        "heading_font": "Space Grotesk",
-        "body_font": "Inter",
-        "border_radius": "0.75rem"
-      }},
-      "contact_info": {{
-        "address": "Extracted street address in {location}",
-        "phone": "Extracted phone number",
-        "hours": "Extracted operating hours",
-        "policy_badge": "Key operational highlight"
-      }},
-      "categories": ["Category 1", "Category 2", "Category 3"],
-      "items": [
-        {{
-          "id": "item-1",
-          "name": "Real Item or Service Name",
-          "category": "Category 1",
-          "price": 18.00,
-          "price_label": "$18.00",
-          "badge": "Popular",
-          "description": "Authentic description of item or service.",
-          "options": ["Option 1", "Option 2"],
-          "image_query": "Specific photo search query for this item/service"
-        }}
-      ],
-      "reviews": [
-        {{"author": "Local Customer", "rating": "5.0", "text": "Specific review praise."}}
-      ]
-    }}
-    """
-
-    for model_id in get_available_groq_models():
-        try:
-            print(f"[ARGUS Synthesizer] Attempting blueprint generation with live model: {model_id}")
-            resp = groq_client.chat.completions.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": "Output strictly valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                max_tokens=3200,
-                response_format={"type": "json_object"}
+            return HTMLResponse(
+                content=f"""<!DOCTYPE html>
+                <html><head><script src="https://cdn.tailwindcss.com"></script></head>
+                <body class="bg-slate-950 text-white min-h-screen flex items-center justify-center p-6">
+                  <div class="max-w-md text-center space-y-4 bg-slate-900 p-8 rounded-2xl border border-slate-800">
+                    <h1 class="text-2xl font-bold text-amber-400">Demo Not Compiled Yet (`{clean_slug}`)</h1>
+                    <p class="text-sm text-slate-400">If ARGUS just generated a Research Proposal for this site, reply <code>#argus approve</code> to compile and deploy it.</p>
+                    <a href="/" class="inline-block bg-amber-500 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-sm">Open ARGUS Command Center</a>
+                  </div>
+                </body></html>""",
+                status_code=404
             )
-            content = resp.choices[0].message.content.strip()
-            if content.startswith("```"):
-                lines = content.splitlines()
-                content = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-            parsed = json.loads(content)
-            if parsed.get("items") and len(parsed["items"]) >= 3:
-                return parsed
-        except Exception as e:
-            print(f"[ARGUS Synthesizer] Model '{model_id}' failed: {e}")
 
-    print("[ARGUS Synthesizer] Using deterministic research parser fallback.")
-    return build_deterministic_blueprint(business_name, niche, location, research_corpus)
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        html_content = f.read()
+    return HTMLResponse(content=html_content, status_code=200)
 
-def compile_bespoke_webapp(blueprint: Dict[str, Any]) -> str:
+
+@app.get("/demos", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
+async def argus_command_center_ui():
     """
-    Stage 3: Dynamic Frontend Compiler.
-    Generates a complete, bespoke, multi-section single-page application driven by the blueprint JSON.
+    Serves the interactive ARGUS v4.0 Jarvis Command Center UI:
+    - Live Terminal for `#argus` directives
+    - One-Click Creative Proposal Approval & Feedback Drawer
+    - Deployed Websites Gallery with Live Preview & In-Place Edit Triggers
+    - Executive Briefing, Calendar, Canvas LMS & Knowledge Graph Panels
     """
-    theme = blueprint.get("theme", {})
-    contact = blueprint.get("contact_info", {})
-    heading_font = theme.get("heading_font", "Plus Jakarta Sans")
-    body_font = theme.get("body_font", "Inter")
-    font_url = f"https://fonts.googleapis.com/css2?family={heading_font.replace(' ', '+')}:wght@600;700;800&family={body_font.replace(' ', '+')}:wght@400;500;600;700&display=swap"
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 8")
+    pending_rows = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM generated_artifacts ORDER BY updated_at DESC LIMIT 20")
+    artifact_rows = [dict(r) for r in c.fetchall()]
+    conn.close()
 
-    blueprint_json_str = json.dumps(blueprint)
+    # Include any disk HTML demos
+    known_slugs = {r["slug"] for r in artifact_rows}
+    for f in sorted(os.listdir(DEMO_DIR)):
+        if f.endswith(".html"):
+            s = f[:-5]
+            if s not in known_slugs:
+                artifact_rows.append({
+                    "slug": s,
+                    "title": s.replace("-", " ").title(),
+                    "preview_url": f"/preview/{s}",
+                    "version": 1,
+                    "design_notes": "Deployed Demo"
+                })
+
+    demos_cards_html = ""
+    for art in artifact_rows:
+        s = art["slug"]
+        t = art["title"]
+        v = art.get("version", 1)
+        demos_cards_html += f"""
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 flex flex-col justify-between hover:border-cyan-500/50 transition">
+          <div>
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-xs font-mono uppercase px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">v{v} â€¢ /{s}</span>
+              <a href="/preview/{s}" target="_blank" class="text-xs font-bold text-amber-400 hover:underline">Open Live â†—</a>
+            </div>
+            <h4 class="font-bold text-white text-sm truncate">{t}</h4>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex gap-2">
+            <a href="/preview/{s}" target="_blank" class="flex-1 text-center bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold py-1.5 rounded-lg text-xs transition">Launch App</a>
+            <button onclick="promptQuickEdit('{s}')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition">Edit UI</button>
+          </div>
+        </div>
+        """
+
+    pending_cards_html = ""
+    for pt in pending_rows:
+        tid = pt["task_id"]
+        obj = pt["objective"]
+        st = pt["status"]
+        sl = pt["artifact_slug"]
+        badge_cls = "bg-amber-500/20 text-amber-300 border-amber-500/30" if st == "PENDING_APPROVAL" else "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+        pending_cards_html += f"""
+        <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-mono text-slate-400">{tid} â€¢ /{sl}</span>
+            <span class="text-[11px] font-bold px-2 py-0.5 rounded border {badge_cls}">{st}</span>
+          </div>
+          <p class="text-xs text-slate-200 font-semibold">{obj}</p>
+          <div class="flex gap-2 pt-2">
+            <button onclick="approveTask('{tid}')" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs transition">âœ“ Approve & Compile</button>
+            <button onclick="approveWithNotes('{tid}')" class="bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold px-3 py-1.5 rounded-lg text-xs transition">Steer Creative Style</button>
+          </div>
+        </div>
+        """
 
     return f"""<!DOCTYPE html>
-<html lang="en" class="scroll-smooth">
+<html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{blueprint.get('business_name')} | {blueprint.get('niche_subtitle')}</title>
+  <title>ARGUS OS v4.0 â€” Autonomous Jarvis Command Center</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="{font_url}" rel="stylesheet">
-  <style>
-    :root {{
-      --bg-primary: {theme.get('bg_primary', '#0c0a09')};
-      --bg-secondary: {theme.get('bg_secondary', '#1c1917')};
-      --text-primary: {theme.get('text_primary', '#fafaf9')};
-      --text-secondary: {theme.get('text_secondary', '#a8a29e')};
-      --accent: {theme.get('accent_primary', '#f59e0b')};
-      --accent-hover: {theme.get('accent_secondary', '#d97706')};
-      --radius: {theme.get('border_radius', '0.75rem')};
-    }}
-    body {{
-      background-color: var(--bg-primary);
-      color: var(--text-primary);
-      font-family: '{body_font}', sans-serif;
-    }}
-    h1, h2, h3, h4, .font-display {{
-      font-family: '{heading_font}', sans-serif;
-    }}
-    .surface-card {{
-      background-color: var(--bg-secondary);
-      border-radius: var(--radius);
-      border: 1px solid rgba(128, 128, 128, 0.18);
-    }}
-    .btn-accent {{
-      background-color: var(--accent);
-      color: #ffffff;
-      border-radius: var(--radius);
-      transition: all 0.2s ease;
-    }}
-    .btn-accent:hover {{
-      background-color: var(--accent-hover);
-      transform: translateY(-1px);
-    }}
-    .text-accent {{
-      color: var(--accent);
-    }}
-    .border-accent {{
-      border-color: var(--accent);
-    }}
-  </style>
 </head>
-<body class="antialiased selection:bg-amber-500 selection:text-black min-h-screen flex flex-col justify-between">
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen selection:bg-cyan-500 selection:text-slate-950">
 
-  <!-- Top Operational Banner -->
-  <div class="w-full py-2 px-4 text-center text-xs font-semibold tracking-wide border-b border-white/10" style="background-color: var(--bg-secondary); color: var(--text-secondary);">
-    <span class="text-accent font-bold">● LIVE STATUS:</span> {contact.get('policy_badge', 'Open for Customers')} &nbsp;|&nbsp; 📍 {contact.get('address', '')} &nbsp;|&nbsp; 📞 {contact.get('phone', '')}
-  </div>
-
-  <!-- Sticky Navigation -->
-  <header class="sticky top-0 z-40 backdrop-blur-xl border-b border-white/10" style="background-color: color-mix(in srgb, var(--bg-primary) 88%, transparent);">
-    <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-      <div>
-        <a href="#" onclick="switchPage('home')" class="text-2xl font-extrabold tracking-tight font-display" style="color: var(--text-primary);">
-          {blueprint.get('business_name')}
-        </a>
-        <span class="hidden md:inline-block ml-3 text-xs px-2.5 py-1 rounded-full font-medium" style="background-color: var(--bg-secondary); color: var(--text-secondary);">
-          {blueprint.get('niche_subtitle')}
-        </span>
-      </div>
-
-      <nav class="hidden md:flex items-center space-x-8 text-sm font-semibold">
-        <button onclick="switchPage('home')" id="nav-home" class="text-accent border-b-2 border-accent pb-1 transition">Overview & Catalog</button>
-        <button onclick="switchPage('reviews')" id="nav-reviews" class="hover:opacity-80 pb-1 transition" style="color: var(--text-secondary);">Reviews & Story</button>
-        <button onclick="switchPage('location')" id="nav-location" class="hover:opacity-80 pb-1 transition" style="color: var(--text-secondary);">Hours & Location</button>
-      </nav>
-
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex flex-wrap justify-between items-center gap-4">
       <div class="flex items-center space-x-3">
-        <button onclick="toggleDrawer()" class="btn-accent px-5 py-2.5 text-sm font-bold flex items-center gap-2.5 shadow-lg">
-          <span id="drawer-btn-label">{blueprint.get('primary_cta', 'View Selection')}</span>
-          <span id="cart-count" class="bg-black/30 text-white text-xs px-2 py-0.5 rounded-full font-mono">0</span>
-        </button>
+        <div class="w-3 h-3 rounded-full bg-cyan-400 animate-pulse"></div>
+        <h1 class="text-xl font-black tracking-wider uppercase text-white">ARGUS OS <span class="text-cyan-400 font-mono text-sm">v4.0 JARVIS</span></h1>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <button onclick="sendDirective('#argus executive briefing')" class="bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 px-3.5 py-2 rounded-xl font-bold transition">âš¡ Executive Briefing</button>
+        <button onclick="sendDirective('#argus sync canvas assignments')" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-xl font-semibold transition">ðŸŽ“ Canvas LMS</button>
+        <button onclick="sendDirective('#argus list my calendar events')" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-xl font-semibold transition">ðŸ“… Calendar</button>
+        <button onclick="sendDirective('#argus check my gmail inbox')" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-xl font-semibold transition">ðŸ“¬ Gmail</button>
       </div>
     </div>
   </header>
 
-  <!-- VIEW 1: HOME & INTERACTIVE CATALOG -->
-  <main id="page-home" class="flex-grow">
-    <!-- Hero Section -->
-    <section class="relative py-24 md:py-32 px-6 bg-cover bg-center border-b border-white/10" style="background-image: linear-gradient(to bottom, rgba(0,0,0,0.65), rgba(0,0,0,0.85)), url('{blueprint.get('hero_image', '')}');">
-      <div class="max-w-4xl mx-auto text-center space-y-6">
-        <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest bg-white/10 text-white backdrop-blur-md border border-white/20">
-          <span>★ Verified Local Standard</span>
-          <span>•</span>
-          <span>{contact.get('address', '')}</span>
+  <main class="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
+    <!-- Left 7 Cols: Interactive Jarvis Terminal -->
+    <div class="lg:col-span-7 space-y-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="text-base font-bold text-cyan-400 uppercase tracking-wider">Autonomous Directive Console</h2>
+          <span class="text-xs text-slate-400 font-mono">Think â†’ Research â†’ Propose â†’ Compile</span>
         </div>
-        <h1 class="text-4xl sm:text-6xl font-extrabold text-white tracking-tight leading-tight font-display">
-          {blueprint.get('hero_headline')}
-        </h1>
-        <p class="text-lg sm:text-xl text-neutral-200 max-w-2xl mx-auto leading-relaxed">
-          {blueprint.get('hero_subheadline')}
-        </p>
-        <div class="pt-4 flex flex-wrap justify-center gap-4">
-          <a href="#catalog-section" class="btn-accent px-8 py-4 font-bold text-base shadow-xl">
-            Explore Full Offerings
-          </a>
-          <button onclick="switchPage('location')" class="bg-white/10 hover:bg-white/20 text-white border border-white/25 px-8 py-4 font-bold text-base backdrop-blur-md transition" style="border-radius: var(--radius);">
-            Hours & Directions
-          </button>
-        </div>
-      </div>
-    </section>
 
-    <!-- Dynamic Search & Category Filter Bar -->
-    <section id="catalog-section" class="max-w-7xl mx-auto px-6 py-16">
-      <div class="flex flex-col md:flex-row md:items-end justify-between mb-10 gap-6">
-        <div>
-          <span class="text-xs font-bold uppercase tracking-widest text-accent">Complete Live Directory</span>
-          <h2 class="text-3xl sm:text-4xl font-extrabold mt-1 font-display"> Offerings & Pricing</h2>
-        </div>
-        
-        <div class="flex flex-wrap items-center gap-3">
-          <input type="text" id="search-input" oninput="renderCatalog()" placeholder="Search items or services..." class="px-4 py-2 text-sm surface-card focus:outline-none focus:ring-2" style="color: var(--text-primary);" />
-          <div id="category-tabs" class="flex flex-wrap gap-2"></div>
-        </div>
+        <form onsubmit="submitConsole(event)" class="space-y-3">
+          <textarea id="cmd-input" rows="3" placeholder="e.g. #argus create a demo website for Eddie's Pizza on Temple Campus in Philadelphia (or #argus approve: make it a 2-page dark neon theme)" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-sm text-white focus:outline-none focus:border-cyan-500"></textarea>
+          <div class="flex flex-wrap justify-between items-center gap-2">
+            <div class="flex gap-2">
+              <button type="submit" id="send-btn" class="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-black px-6 py-2.5 rounded-xl text-xs uppercase tracking-wider transition shadow-lg">Execute Directive</button>
+              <button type="button" onclick="sendDirective('#argus approve')" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2.5 rounded-xl text-xs transition">âœ“ Approve Pending Build</button>
+            </div>
+            <span id="status-indicator" class="text-xs text-slate-400 font-mono">Ready</span>
+          </div>
+        </form>
+
+        <div id="console-output" class="bg-slate-950 border border-slate-800 rounded-xl p-5 text-sm leading-relaxed text-slate-200 whitespace-pre-wrap max-h-[550px] overflow-y-auto font-sans">Send any research, website creation, calendar, Canvas, or Gmail command above. When building websites or apps, ARGUS will research real facts & photos first and present a Creative Blueprint Proposal for your approval.</div>
       </div>
 
-      <!-- Dynamic Item Grid -->
-      <div id="catalog-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"></div>
-    </section>
+      <!-- Creative Approval Queue -->
+      <div class="space-y-3">
+        <h3 class="text-sm font-bold uppercase tracking-wider text-slate-400">Creative Approval Checkpoints</h3>
+        <div class="grid grid-cols-1 gap-3">
+          {pending_cards_html or '<p class="text-xs text-slate-500">No pending proposals yet.</p>'}
+        </div>
+      </div>
+    </div>
+
+    <!-- Right 5 Cols: Deployed Web Applications Directory -->
+    <div class="lg:col-span-5 space-y-4">
+      <div class="flex justify-between items-center">
+        <h2 class="text-sm font-bold uppercase tracking-wider text-slate-400">Deployed Web Applications ({len(artifact_rows)})</h2>
+        <button onclick="window.location.reload()" class="text-xs text-cyan-400 hover:underline">â†» Refresh List</button>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {demos_cards_html or '<p class="text-xs text-slate-500 col-span-2">No demos generated yet.</p>'}
+      </div>
+    </div>
   </main>
 
-  <!-- VIEW 2: REVIEWS & BRAND STORY (Multi-Page Tab View) -->
-  <section id="page-reviews" class="hidden max-w-5xl mx-auto px-6 py-20 flex-grow">
-    <div class="text-center mb-14">
-      <span class="text-xs font-bold uppercase tracking-widest text-accent">Community Reputation</span>
-      <h2 class="text-4xl font-extrabold mt-2 font-display">What Locals Are Saying</h2>
-      <p class="mt-2 text-sm" style="color: var(--text-secondary);">Verified customer experiences and neighborhood feedback for {blueprint.get('business_name')}.</p>
-    </div>
-    <div id="reviews-grid" class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16"></div>
-    <div class="surface-card p-8 text-center space-y-4">
-      <h3 class="text-2xl font-bold font-display">Ready to Experience {blueprint.get('business_name')}?</h3>
-      <p class="text-sm max-w-xl mx-auto" style="color: var(--text-secondary);">{blueprint.get('hero_subheadline')}</p>
-      <button onclick="switchPage('home')" class="btn-accent px-6 py-3 text-sm font-bold">Return to Offerings</button>
-    </div>
-  </section>
-
-  <!-- VIEW 3: HOURS, LOCATION & DIRECT CONTACT (Multi-Page Tab View) -->
-  <section id="page-location" class="hidden max-w-5xl mx-auto px-6 py-20 flex-grow">
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
-      <div class="surface-card p-8 space-y-6">
-        <span class="text-xs font-bold uppercase tracking-widest text-accent">Visit or Call Direct</span>
-        <h2 class="text-3xl font-extrabold font-display">{blueprint.get('business_name')}</h2>
-        <div class="space-y-4 text-sm">
-          <div>
-            <div class="font-bold opacity-70 uppercase text-xs">Location / Address</div>
-            <div class="text-base font-semibold mt-1">{contact.get('address', '')}</div>
-          </div>
-          <div>
-            <div class="font-bold opacity-70 uppercase text-xs">Direct Phone</div>
-            <a href="tel:{contact.get('phone', '')}" class="text-base font-bold text-accent hover:underline mt-1 block">{contact.get('phone', '')}</a>
-          </div>
-          <div>
-            <div class="font-bold opacity-70 uppercase text-xs">Operating Hours</div>
-            <div class="text-base mt-1">{contact.get('hours', '')}</div>
-          </div>
-          <div class="pt-4 border-t border-white/10">
-            <span class="inline-block px-3 py-1 rounded text-xs font-bold" style="background-color: var(--bg-primary); color: var(--accent);">
-              {contact.get('policy_badge', '')}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Direct Inquiry / Callback Form -->
-      <div class="surface-card p-8 space-y-5">
-        <h3 class="text-2xl font-bold font-display">Send a Direct Inquiry</h3>
-        <p class="text-xs" style="color: var(--text-secondary);">Have a special request, catering question, or custom service inquiry? Reach out directly.</p>
-        <form onsubmit="submitInquiry(event)" class="space-y-4 text-sm">
-          <input type="text" required placeholder="Your Name" class="w-full p-3 rounded bg-black/20 border border-white/15 focus:outline-none" style="color: var(--text-primary);">
-          <input type="tel" required placeholder="Phone Number" class="w-full p-3 rounded bg-black/20 border border-white/15 focus:outline-none" style="color: var(--text-primary);">
-          <textarea rows="3" required placeholder="How can we help you?" class="w-full p-3 rounded bg-black/20 border border-white/15 focus:outline-none" style="color: var(--text-primary);"></textarea>
-          <button type="submit" class="w-full btn-accent py-3 font-bold text-sm">Send Message</button>
-        </form>
-        <div id="inquiry-toast" class="hidden p-3 rounded text-xs font-bold bg-emerald-500/20 text-emerald-300 text-center">
-          ✓ Inquiry received! Our team will contact you shortly.
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ITEM CUSTOMIZER / SERVICE OPTIONS MODAL -->
-  <div id="item-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
-    <div class="surface-card max-w-md w-full p-6 space-y-5 shadow-2xl">
-      <div class="flex justify-between items-start">
-        <div>
-          <h3 id="modal-item-name" class="text-xl font-bold font-display"></h3>
-          <p id="modal-item-price" class="text-sm font-bold text-accent mt-0.5"></p>
-        </div>
-        <button onclick="closeItemModal()" class="text-sm opacity-60 hover:opacity-100">✕</button>
-      </div>
-      <p id="modal-item-desc" class="text-xs leading-relaxed" style="color: var(--text-secondary);"></p>
-      
-      <div id="modal-options-container" class="space-y-2 pt-2">
-        <label class="text-xs font-bold uppercase tracking-wider opacity-75">Select Preferences / Modifiers:</label>
-        <div id="modal-options-list" class="space-y-2 text-sm"></div>
-      </div>
-
-      <div>
-        <label class="text-xs font-bold uppercase tracking-wider opacity-75">Special Notes / Requests:</label>
-        <input id="modal-custom-note" type="text" placeholder="Optional instructions..." class="w-full mt-1 p-2.5 text-xs rounded bg-black/20 border border-white/15" style="color: var(--text-primary);" />
-      </div>
-
-      <button id="modal-confirm-btn" class="w-full btn-accent py-3 font-bold text-sm">Add to Selection</button>
-    </div>
-  </div>
-
-  <!-- SLIDE-OVER INTERACTIVE DRAWER (CART OR BOOKING ESTIMATE) -->
-  <div id="side-drawer" class="fixed inset-0 z-50 pointer-events-none opacity-0 transition-opacity duration-300">
-    <div onclick="toggleDrawer()" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
-    <div id="drawer-panel" class="absolute right-0 top-0 h-full w-full max-w-md p-6 flex flex-col justify-between pointer-events-auto transform translate-x-full transition-transform duration-300 shadow-2xl" style="background-color: var(--bg-secondary);">
-      <div>
-        <div class="flex justify-between items-center pb-4 border-b border-white/10">
-          <h2 class="text-xl font-extrabold font-display">{blueprint.get('drawer_title', 'Your Selection')}</h2>
-          <button onclick="toggleDrawer()" class="text-sm opacity-70 hover:opacity-100">✕ Close</button>
-        </div>
-        <div id="drawer-items" class="py-5 space-y-3 overflow-y-auto max-h-[55vh]"></div>
-      </div>
-
-      <div class="pt-4 border-t border-white/10 space-y-4">
-        <div class="space-y-2 text-xs">
-          <input id="customer-name" type="text" placeholder="Your Full Name *" class="w-full p-2.5 rounded bg-black/20 border border-white/15" style="color: var(--text-primary);">
-          <input id="customer-phone" type="tel" placeholder="Mobile Phone for Updates *" class="w-full p-2.5 rounded bg-black/20 border border-white/15" style="color: var(--text-primary);">
-          <input id="customer-time" type="text" placeholder="Preferred Pickup / Appointment Time" class="w-full p-2.5 rounded bg-black/20 border border-white/15" style="color: var(--text-primary);">
-        </div>
-        <div class="flex justify-between items-baseline text-base font-bold pt-2">
-          <span>Estimated Total</span>
-          <span id="drawer-total" class="text-xl text-accent font-mono">$0.00</span>
-        </div>
-        <button onclick="completeCheckout()" class="w-full btn-accent py-3.5 font-extrabold text-sm shadow-lg">
-          {blueprint.get('checkout_button_text', 'Confirm & Submit')}
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- CONFIRMATION RECEIPT MODAL -->
-  <div id="receipt-modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-    <div class="surface-card max-w-sm w-full p-6 text-center space-y-4 shadow-2xl">
-      <div class="w-12 h-12 rounded-full flex items-center justify-center mx-auto text-xl font-bold btn-accent">✓</div>
-      <h3 class="text-2xl font-extrabold font-display">Confirmed!</h3>
-      <p id="receipt-summary" class="text-xs leading-relaxed" style="color: var(--text-secondary);"></p>
-      <div id="receipt-box" class="p-4 rounded text-xs font-mono text-left space-y-1 bg-black/30 border border-white/10"></div>
-      <button onclick="closeReceipt()" class="w-full btn-accent py-2.5 font-bold text-xs">Done</button>
-    </div>
-  </div>
-
-  <!-- Footer -->
-  <footer class="border-t border-white/10 py-10 px-6 text-center text-xs mt-16" style="background-color: var(--bg-secondary); color: var(--text-secondary);">
-    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
-      <div class="font-bold" style="color: var(--text-primary);">&copy; 2026 {blueprint.get('business_name')}. All rights reserved.</div>
-      <div>📍 {contact.get('address', '')} &bull; 📞 {contact.get('phone', '')}</div>
-    </div>
-  </footer>
-
-  <!-- Client-Side Application Engine -->
   <script>
-    const BLUEPRINT = {blueprint_json_str};
-    let activeCategory = 'All';
-    let cart = [];
-    let currentModalItem = null;
+    async function sendDirective(text) {{
+      const out = document.getElementById('console-output');
+      const status = document.getElementById('status-indicator');
+      document.getElementById('cmd-input').value = text;
+      status.innerText = 'ARGUS Researching & Executing...';
+      out.innerText = 'â³ Executing multi-hop research & tool calls for:\\n' + text;
 
-    function initApp() {{
-      renderCategories();
-      renderCatalog();
-      renderReviews();
-      renderDrawer();
-    }}
-
-    function switchPage(pageId) {{
-      ['home', 'reviews', 'location'].forEach(p => {{
-        document.getElementById('page-' + p).classList.add('hidden');
-        const navBtn = document.getElementById('nav-' + p);
-        if (navBtn) {{
-          navBtn.className = "hover:opacity-80 pb-1 transition";
-          navBtn.style.color = "var(--text-secondary)";
-        }}
-      }});
-      document.getElementById('page-' + pageId).classList.remove('hidden');
-      const activeNav = document.getElementById('nav-' + pageId);
-      if (activeNav) {{
-        activeNav.className = "text-accent border-b-2 border-accent pb-1 transition";
-        activeNav.style.color = "var(--accent)";
-      }}
-      window.scrollTo({{ top: 0, behavior: 'smooth' }});
-    }}
-
-    function renderCategories() {{
-      const cats = ['All', ...(BLUEPRINT.categories || [])];
-      const container = document.getElementById('category-tabs');
-      container.innerHTML = cats.map(c => `
-        <button onclick="setCategory('${{c.replace(/'/g, "\\'")}}')" class="px-4 py-2 text-xs font-bold transition ${{activeCategory === c ? 'btn-accent' : 'surface-card hover:opacity-80'}}">
-          ${{c}}
-        </button>
-      `).join('');
-    }}
-
-    function setCategory(cat) {{
-      activeCategory = cat;
-      renderCategories();
-      renderCatalog();
-    }}
-
-    function renderCatalog() {{
-      const query = (document.getElementById('search-input').value || '').toLowerCase();
-      const grid = document.getElementById('catalog-grid');
-      const items = (BLUEPRINT.items || []).filter(item => {{
-        const matchesCat = activeCategory === 'All' || item.category === activeCategory;
-        const matchesQuery = item.name.toLowerCase().includes(query) || (item.description || '').toLowerCase().includes(query);
-        return matchesCat && matchesQuery;
-      }});
-
-      const actionLabel = BLUEPRINT.interaction_mode === 'service_booking' ? 'Select Service' : 'Add to Order';
-
-      grid.innerHTML = items.map((item, idx) => `
-        <div class="surface-card overflow-hidden flex flex-col justify-between group hover:border-white/30 transition shadow-md">
-          <div>
-            <div class="relative h-56 overflow-hidden bg-black/20">
-              <img src="${{item.image_url}}" alt="${{item.name}}" class="w-full h-full object-cover group-hover:scale-105 transition duration-500" onerror="this.src='https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80'">
-              ${{item.badge ? `<span class="absolute top-3 left-3 px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wider btn-accent shadow">${{item.badge}}</span>` : ''}}
-            </div>
-            <div class="p-6">
-              <div class="flex justify-between items-baseline gap-2 mb-2">
-                <h3 class="text-lg font-bold font-display leading-snug">${{item.name}}</h3>
-                <span class="text-sm font-extrabold text-accent shrink-0">${{item.price_label || ('$' + Number(item.price).toFixed(2))}}</span>
-              </div>
-              <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">${{item.description}}</p>
-            </div>
-          </div>
-          <div class="px-6 pb-6 pt-2">
-            <button onclick="openItemModal(${{idx}})" class="w-full py-2.5 text-xs font-bold btn-accent">
-              ${{actionLabel}}
-            </button>
-          </div>
-        </div>
-      `).join('');
-    }}
-
-    function openItemModal(index) {{
-      const item = BLUEPRINT.items[index];
-      currentModalItem = item;
-      document.getElementById('modal-item-name').innerText = item.name;
-      document.getElementById('modal-item-price').innerText = item.price_label || ('$' + Number(item.price).toFixed(2));
-      document.getElementById('modal-item-desc').innerText = item.description;
-      document.getElementById('modal-custom-note').value = '';
-
-      const optsList = document.getElementById('modal-options-list');
-      const opts = item.options || [];
-      if (opts.length > 0) {{
-        document.getElementById('modal-options-container').classList.remove('hidden');
-        optsList.innerHTML = opts.map((opt, i) => `
-          <label class="flex items-center space-x-2 cursor-pointer">
-            <input type="checkbox" value="${{opt}}" class="modal-opt-check rounded">
-            <span class="text-xs">${{opt}}</span>
-          </label>
-        `).join('');
-      }} else {{
-        document.getElementById('modal-options-container').classList.add('hidden');
-      }}
-
-      const confirmBtn = document.getElementById('modal-confirm-btn');
-      confirmBtn.onclick = () => confirmModalAdd();
-
-      const modal = document.getElementById('item-modal');
-      modal.classList.remove('hidden');
-      modal.classList.add('flex');
-    }}
-
-    function closeItemModal() {{
-      const modal = document.getElementById('item-modal');
-      modal.classList.add('hidden');
-      modal.classList.remove('flex');
-    }}
-
-    function confirmModalAdd() {{
-      if (!currentModalItem) return;
-      const checked = Array.from(document.querySelectorAll('.modal-opt-check:checked')).map(el => el.value);
-      const note = document.getElementById('modal-custom-note').value.trim();
-      const modifiers = [...checked, ...(note ? [note] : [])].join(', ');
-
-      cart.push({{
-        name: currentModalItem.name,
-        price: Number(currentModalItem.price) || 0,
-        modifiers: modifiers,
-        qty: 1
-      }});
-
-      closeItemModal();
-      renderDrawer();
-      toggleDrawer(true);
-    }}
-
-    function toggleDrawer(forceOpen = null) {{
-      const drawer = document.getElementById('side-drawer');
-      const panel = document.getElementById('drawer-panel');
-      const isOpen = !drawer.classList.contains('opacity-0');
-      const shouldOpen = forceOpen !== null ? forceOpen : !isOpen;
-
-      if (shouldOpen) {{
-        drawer.classList.remove('opacity-0', 'pointer-events-none');
-        panel.classList.remove('translate-x-full');
-      }} else {{
-        drawer.classList.add('opacity-0', 'pointer-events-none');
-        panel.classList.add('translate-x-full');
+      try {{
+        const res = await fetch('/chat', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ message: text }})
+        }});
+        const data = await res.json();
+        out.innerText = data.response || data.reply || JSON.stringify(data, null, 2);
+        status.innerText = 'Completed';
+      }} catch (err) {{
+        out.innerText = 'Error: ' + err;
+        status.innerText = 'Error';
       }}
     }}
 
-    function removeCartItem(idx) {{
-      cart.splice(idx, 1);
-      renderDrawer();
-    }}
-
-    function renderDrawer() {{
-      const container = document.getElementById('drawer-items');
-      const countEl = document.getElementById('cart-count');
-      const totalEl = document.getElementById('drawer-total');
-
-      countEl.innerText = cart.length;
-      const total = cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-      totalEl.innerText = '$' + total.toFixed(2);
-
-      if (cart.length === 0) {{
-        container.innerHTML = `<p class="text-xs text-center py-10 opacity-60">Nothing selected yet. Choose an item or service from the catalog.</p>`;
-        return;
-      }}
-
-      container.innerHTML = cart.map((item, idx) => `
-        <div class="p-3.5 rounded bg-black/20 border border-white/10 flex justify-between items-start gap-3">
-          <div>
-            <div class="text-sm font-bold">${{item.name}}</div>
-            ${{item.modifiers ? `<div class="text-[11px] opacity-75 mt-0.5">${{item.modifiers}}</div>` : ''}}
-            <div class="text-xs font-mono text-accent mt-1">$${{item.price.toFixed(2)}}</div>
-          </div>
-          <button onclick="removeCartItem(${{idx}})" class="text-xs opacity-50 hover:opacity-100">✕</button>
-        </div>
-      `).join('');
-    }}
-
-    function completeCheckout() {{
-      if (cart.length === 0) return;
-      const name = document.getElementById('customer-name').value.trim() || 'Valued Customer';
-      const phone = document.getElementById('customer-phone').value.trim() || 'Provided at counter';
-      const time = document.getElementById('customer-time').value.trim() || 'Standard Priority';
-      const total = cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-
-      toggleDrawer(false);
-      document.getElementById('receipt-summary').innerText = `Thank you, ${{name}}! Your request has been registered with ${{BLUEPRINT.business_name}}.`;
-      document.getElementById('receipt-box').innerHTML = `
-        <div><strong>Reference:</strong> #ARG-${{Math.floor(1000 + Math.random() * 9000)}}</div>
-        <div><strong>Customer:</strong> ${{name}} (${{phone}})</div>
-        <div><strong>Requested Time:</strong> ${{time}}</div>
-        <div><strong>Items Selected:</strong> ${{cart.length}}</div>
-        <div><strong>Total Estimate:</strong> $${{total.toFixed(2)}}</div>
-      `;
-      const modal = document.getElementById('receipt-modal');
-      modal.classList.remove('hidden');
-      modal.classList.add('flex');
-    }}
-
-    function closeReceipt() {{
-      const modal = document.getElementById('receipt-modal');
-      modal.classList.add('hidden');
-      modal.classList.remove('flex');
-      cart = [];
-      renderDrawer();
-    }}
-
-    function renderReviews() {{
-      const grid = document.getElementById('reviews-grid');
-      const reviews = BLUEPRINT.reviews || [];
-      grid.innerHTML = reviews.map(r => `
-        <div class="surface-card p-6 space-y-3">
-          <div class="text-accent text-sm font-bold">★★★★★ ${{r.rating || '5.0'}}</div>
-          <p class="text-xs italic leading-relaxed" style="color: var(--text-secondary);">"${{r.text}}"</p>
-          <div class="text-xs font-bold pt-2">— ${{r.author}}</div>
-        </div>
-      `).join('');
-    }}
-
-    function submitInquiry(e) {{
+    function submitConsole(e) {{
       e.preventDefault();
-      document.getElementById('inquiry-toast').classList.remove('hidden');
-      e.target.reset();
+      const val = document.getElementById('cmd-input').value.trim();
+      if (!val) return;
+      sendDirective(val);
     }}
 
-    window.addEventListener('DOMContentLoaded', initApp);
+    function approveTask(taskId) {{
+      sendDirective('#argus approve');
+    }}
+
+    function approveWithNotes(taskId) {{
+      const notes = prompt('Enter your creative direction or modifications (e.g. "Make it a 2-page dark neon layout with a custom calculator"):');
+      if (notes !== null) {{
+        sendDirective('#argus approve: ' + notes);
+      }}
+    }}
+
+    function promptQuickEdit(slug) {{
+      const notes = prompt('What should ARGUS change or add on /preview/' + slug + '?');
+      if (notes) {{
+        sendDirective('#argus edit ' + slug + ': ' + notes);
+      }}
+    }}
   </script>
 </body>
 </html>"""
 
 
-def generate_client_website_tool(
-    business_name: str, 
-    niche: str, 
-    location: str, 
-    contact_phone: Optional[str] = None, 
-    highlights: Optional[str] = None
-) -> str:
-    # 1. Clean business name & generate clean URL slug
-    clean_biz_name = re.split(r'\s+(?:and\s+just|and\s+make|with|featuring)\b', business_name, flags=re.IGNORECASE)[0].strip()
-    slug = "".join(c for c in clean_biz_name.lower() if c.isalnum() or c == "-").strip("-")
-    if not slug:
-        slug = f"demo-{int(time.time())}"
-
-    # 2. Stage 1: Multi-Vector Perplexity-style Deep Research
-    print(f"[ARGUS Engine] Stage 1: Deep web research for '{clean_biz_name}' in '{location}'...")
-    research = perplexity_deep_research(clean_biz_name, location, niche)
-
-    # 3. Stage 2A: Synthesize Full Business Blueprint & Theme Architecture
-    print(f"[ARGUS Engine] Stage 2A: Synthesizing brand palette, UX mode, and full catalog...")
-    # Inside generate_client_website_tool, right after Stage 2A (synthesize_business_blueprint):
-    blueprint = synthesize_business_blueprint(clean_biz_name, niche, location, research["corpus"])
-
-    # Override any hallucinated or placeholder contact details with the real verified ones from the web crawl
-    contact_info = blueprint.get("contact_info", {})
-    if research.get("verified_phone") and ("555" in contact_info.get("phone", "") or not contact_info.get("phone")):
-        contact_info["phone"] = research["verified_phone"]
-    if research.get("verified_address") and len(research["verified_address"]) > 8:
-        contact_info["address"] = research["verified_address"]
-    blueprint["contact_info"] = contact_info
-
-    # Stage 2B: Pass real_site_images into harvest_targeted_media
-    media = harvest_targeted_media(
-        clean_biz_name,
-        location,
-        blueprint.get("items", []),
-        blueprint.get("hero_image_query", niche),
-        real_site_images=research.get("real_site_images", [])
-    )
-    blueprint["hero_image"] = media["hero_image"]
-    blueprint["items"] = media["items"]
-
-    # 5. Stage 3: Compile Bespoke Multi-View Web Application
-    print(f"[ARGUS Engine] Stage 3: Compiling bespoke interactive web application...")
-    raw_html = compile_bespoke_webapp(blueprint)
-
-    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(raw_html)
-
-    preview_url = f"https://argus-backend-ojna.onrender.com/preview/{slug}"
-    mode_label = "Interactive Service Booking & Estimator" if blueprint.get("interaction_mode") == "service_booking" else "Interactive Live Ordering & Modifier Cart"
-    return (
-        f"### Bespoke Web Application Deployed for {clean_biz_name}\n"
-        f"- **Live URL:** [{preview_url}]({preview_url})\n"
-        f"- **UX Engine Mode:** `{mode_label}`\n"
-        f"- **Catalog Populated:** `{len(blueprint.get('items', []))} authentic offerings` with modifier modals & live search\n"
-        f"- **Multi-View Pages:** Overview & Catalog, Customer Reviews, and Direct Location/Inquiry Portal\n"
-        f"- **Typography & Theme:** `{blueprint.get('theme', {}).get('heading_font')}` paired with custom brand hex variables"
-    )
-
-def send_iphone_push(title: str, message: str, priority: int = 0, sound: str = "cosmic") -> str:
-    """Dispatches a push notification directly to user's iPhone via Pushover."""
-    if not (PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN):
-        return "Pushover credentials missing in environment variables."
-
-    url = "https://api.pushover.net/1/messages.json"
-    payload = urllib.parse.urlencode({
-        "token": PUSHOVER_APP_TOKEN,
-        "user": PUSHOVER_USER_KEY,
-        "title": f"ARGUS // {title}",
-        "message": message,
-        "priority": priority,
-        "sound": sound
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        url, 
-        data=payload, 
-        headers={"Content-Type": "application/x-www-form-urlencoded"}, 
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return "Notification delivered to iPhone."
-    except Exception as exc:
-        return f"Push dispatch failed: {str(exc)}"
-
-# ==============================================================================
-# Security / Auth
-# ==============================================================================
-
-def verify_token(authorization: Optional[str] = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header missing.")
-    
-    parts = authorization.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=401, 
-            detail="Invalid Authorization header format. Expected 'Bearer <token>'."
-        )
-    
-    token = parts[1].strip().strip('"').strip("'")
-    expected_token = ARGUS_BEARER_TOKEN.strip().strip('"').strip("'")
-
-    if token != expected_token:
-        raise HTTPException(status_code=403, detail="Invalid or unauthorized token.")
-    
-    return token
-
-# ==============================================================================
-# Database & Memory Persistence
-# ==============================================================================
-
-def init_db():
-    conn = sqlite3.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_memories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fact TEXT NOT NULL UNIQUE,
-            category TEXT DEFAULT 'general',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Core Persistent Profile Seeds (survives all redeploys and restarts)
-    permanent_profile_seeds = [
-        ("The user's favorite algorithm is Dijkstra's algorithm.", "preference"),
-        ("The user is Kyle Wilson, studying Computer Science at Temple University.", "profile"),
-        ("The user prefers autonomous executive summaries with clean markdown tables and structured bullet points.", "instruction")
-    ]
-
-    for fact, category in permanent_profile_seeds:
-        cursor.execute(
-            "INSERT OR IGNORE INTO user_memories (fact, category) VALUES (?, ?)",
-            (fact, category)
-        )
-
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def save_message(session_id: str, role: str, content: str):
-    if not content or not content.strip():
-        return
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        cursor.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, role, content.strip(), now_iso)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Error saving message to DB: {e}")
-
-def get_history(session_id: str, limit: int = 6) -> List[Dict[str, str]]:
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-            (session_id, limit)
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        
-        valid_history = []
-        for r, c in reversed(rows):
-            clean_content = (c or "").strip()
-            # ADD THIS GUARD: Truncate past huge code/table dumps to protect TPM
-            if len(clean_content) > 1200:
-                clean_content = clean_content[:1200] + "... [prior details truncated]"
-                
-            if clean_content and not clean_content.startswith("{") and not clean_content.startswith("["):
-                valid_history.append({"role": r, "content": clean_content})
-        return valid_history
-    except Exception as e:
-        print(f"Error retrieving history: {e}")
-        return []
-
-def save_fact_tool(fact: str, category: Optional[str] = "general") -> str:
-    clean_fact = fact.strip()
-    if not clean_fact:
-        return "Cannot save empty fact."
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        cursor.execute(
-            "INSERT OR IGNORE INTO user_memories (fact, category, created_at) VALUES (?, ?, ?)",
-            (clean_fact, category or "general", now_iso)
-        )
-        conn.commit()
-        conn.close()
-        return f"Successfully saved to permanent memory: '{clean_fact}'"
-    except Exception as e:
-        return f"Failed to save fact: {str(e)}"
-
-def list_facts() -> List[str]:
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("SELECT fact FROM user_memories ORDER BY id ASC")
-        rows = cursor.fetchall()
-        conn.close()
-        return [r[0] for r in rows if r[0]]
-    except Exception as e:
-        print(f"Error fetching facts: {e}")
-        return []
-
-def get_all_memories_records() -> List[Dict[str, Any]]:
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, fact, category, created_at FROM user_memories ORDER BY id DESC")
-        rows = cursor.fetchall()
-        conn.close()
-        return [
-            {"id": r[0], "fact": r[1], "category": r[2], "created_at": r[3]}
-            for r in rows
-        ]
-    except Exception:
-        return []
-
-def delete_memory_by_id(memory_id: int) -> bool:
-    try:
-        conn = sqlite3.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM user_memories WHERE id = ?", (memory_id,))
-        affected = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return affected > 0
-    except Exception:
-        return False
-
-# ==============================================================================
-# Google OAuth Client Factory (Calendar & Gmail)
-# ==============================================================================
-
-def get_google_credentials():
-    if not GOOGLE_APIS_AVAILABLE:
-        return None
-
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
-    access_token = os.getenv("ACCESS_TOKEN")
-
-    creds_info = None
-    if client_id and client_secret and refresh_token:
-        creds_info = {
-            "token": access_token,
-            "refresh_token": refresh_token,
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scopes": [
-                "https://www.googleapis.com/auth/calendar",
-                "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.compose",
-                "https://www.googleapis.com/auth/gmail.modify"
-            ]
-        }
-    elif GOOGLE_CALENDAR_TOKEN:
-        try:
-            creds_info = json.loads(GOOGLE_CALENDAR_TOKEN)
-        except Exception:
-            return None
-
-    if not creds_info:
-        return None
-
-    try:
-        return Credentials.from_authorized_user_info(creds_info)
-    except Exception:
-        return None
-
-def get_calendar_service():
-    creds = get_google_credentials()
-    if not creds:
-        return None
-    try:
-        return build("calendar", "v3", credentials=creds)
-    except Exception:
-        return None
-
-def get_gmail_service():
-    creds = get_google_credentials()
-    if not creds:
-        return None
-    try:
-        return build("gmail", "v1", credentials=creds)
-    except Exception:
-        return None
-
-def _normalize_iso_time(time_str: str) -> str:
-    """Ensures ISO string conforms to RFC3339 for Google Calendar API."""
-    clean = time_str.strip().replace(" ", "T")
-    if not clean.endswith("Z") and "+" not in clean[10:] and "-" not in clean[10:]:
-        clean += "-04:00"
-    return clean
-
-def get_drive_service():
-    creds = get_google_credentials()
-    if not creds:
-        return None
-    try:
-        return build("drive", "v3", credentials=creds)
-    except Exception:
-        return None
-
-def drive_search_tool(query: str, max_results: int = 5) -> str:
-    """Searches Google Drive and Google Docs using full-text query matching across titles and contents."""
-    service = get_drive_service()
-    if not service:
-        return "Google Drive integration is not active or OAuth credentials need updating."
-
-    try:
-        # fullText searches within Google Docs, PDFs, slides, and plain text
-        # name contains searches filenames
-        clean_q = query.replace("'", "\\'")
-        drive_query = (
-            f"(name contains '{clean_q}' or fullText contains '{clean_q}') "
-            "and trashed = false"
-        )
-
-        results = service.files().list(
-            q=drive_query,
-            pageSize=max_results,
-            fields="files(id, name, mimeType, webViewLink, modifiedTime, description)"
-        ).execute()
-
-        files = results.get("files", [])
-        if not files:
-            return f"No Google Drive or Docs files found matching: '{query}'."
-
-        output = []
-        for f in files:
-            name = f.get("name", "Untitled")
-            link = f.get("webViewLink", "")
-            mime = f.get("mimeType", "")
-            mod_time = f.get("modifiedTime", "")[:10]
-            
-            # Map MIME types to clean labels
-            type_label = "Doc" if "document" in mime else (
-                "Sheet" if "spreadsheet" in mime else (
-                    "Slide" if "presentation" in mime else (
-                        "PDF" if "pdf" in mime else "File"
-                    )
-                )
-            )
-
-            output.append(f"- **[{type_label}] [{name}]({link})**\n  *Last Modified:* {mod_time}")
-
-        return f"### Google Drive Search Results for '{query}'\n\n" + "\n\n".join(output)
-
-    except Exception as e:
-        return f"Google Drive search error: {str(e)}"
-
-# ==============================================================================
-# Weather Integration Tool
-# ==============================================================================
-
-def get_weather(location: str = "Philadelphia") -> str:
-    clean_loc = urllib.parse.quote(location.strip() or "Philadelphia")
-    try:
-        url = f"https://wttr.in/{clean_loc}?format=%l:+%c+%t,+%w,+Humidity:+%h&m"
-        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            result = response.read().decode("utf-8").strip()
-            if result and "Unknown location" not in result and "<html>" not in result:
-                return result
-    except Exception:
-        pass
-    try:
-        url_sec = f"https://wttr.in/{clean_loc}?0&m&T"
-        req_sec = urllib.request.Request(url_sec, headers={"User-Agent": "curl/7.68.0"})
-        with urllib.request.urlopen(req_sec, timeout=5) as response:
-            return response.read().decode("utf-8")[:600].strip()
-    except Exception as exc:
-        return f"Weather report currently unavailable for {location}: {str(exc)}"
-
-
-# ==============================================================================
-# Google Searching integration
-# ==============================================================================
-
-def google_search_grounding(query: str) -> str:
-    """Executes native Google Search Grounding via Gemini, returning synthesized results with cited source links."""
-    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not gemini_key:
-        return "GEMINI_API_KEY is not configured on Render."
-
-    # Use the stable model endpoint syntax
-    model_name = "gemini-2.5-flash"
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={gemini_key}"
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": query}]
-            }
-        ],
-        "tools": [
-            {"google_search": {}}
-        ]
-    }
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        candidate = data.get("candidates", [{}])[0]
-        text_parts = [
-            p.get("text", "") 
-            for p in candidate.get("content", {}).get("parts", []) 
-            if "text" in p
-        ]
-        grounded_text = "".join(text_parts).strip()
-
-        # Extract source citations and URLs
-        metadata = candidate.get("groundingMetadata", {})
-        chunks = metadata.get("groundingChunks", [])
-        sources = []
-        for c in chunks:
-            web = c.get("web", {})
-            title = web.get("title") or "Source"
-            uri = web.get("uri")
-            if uri and uri not in [s[1] for s in sources]:
-                sources.append((title, uri))
-
-        if sources:
-            source_block = "\n\n**Verified Sources:**\n" + "\n".join([f"- [{t}]({u})" for t, u in sources[:4]])
-            return f"{grounded_text}{source_block}"
-
-        return grounded_text or "No grounded search data could be extracted."
-
-    except urllib.error.HTTPError as e:
-        err_msg = e.read().decode("utf-8")
-        # Direct fallback to DDGS scraper if the Gemini endpoint is temporarily unreachable
-        fallback_results = web_search_tool(query)
-        return f"{fallback_results}\n\n*(Note: Grounding endpoint returned HTTP {e.code}; served via resilient fallback)*"
-    except Exception as e:
-        return web_search_tool(query)
-
-# ==============================================================================
-# Canvas REST API Client & Sanitized Extraction Tools
-# ==============================================================================
-
-def _canvas_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
-    if not CANVAS_API_TOKEN and not CANVAS_SESSION_COOKIE:
-        raise ValueError("Neither CANVAS_API_TOKEN nor CANVAS_SESSION_COOKIE is configured in environment variables.")
-
-    clean_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
-    url = f"{CANVAS_BASE_URL}/api/v1{clean_endpoint}"
-    
-    data_bytes = json.dumps(payload).encode("utf-8") if payload else None
-    req = urllib.request.Request(url, data=data_bytes, method=method)
-    
-    if CANVAS_API_TOKEN:
-        req.add_header("Authorization", f"Bearer {CANVAS_API_TOKEN}")
-    elif CANVAS_SESSION_COOKIE:
-        cookie_header = CANVAS_SESSION_COOKIE.strip().strip('"').strip("'")
-        if not cookie_header.startswith("canvas_session="):
-            cookie_header = f"canvas_session={cookie_header}"
-        req.add_header("Cookie", cookie_header)
-        req.add_header("Referer", f"{CANVAS_BASE_URL}/")
-        req.add_header("Origin", CANVAS_BASE_URL)
-        req.add_header("Sec-Fetch-Site", "same-origin")
-        req.add_header("Sec-Fetch-Mode", "cors")
-        req.add_header("Sec-Fetch-Dest", "empty")
-
-    req.add_header("Accept", "application/json, text/plain, */*")
-    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-    if payload:
-        req.add_header("Content-Type", "application/json")
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            content = resp.read().decode("utf-8")
-            return json.loads(content) if content else {}
-    except urllib.error.HTTPError as e:
-        err_msg = e.read().decode("utf-8")
-        raise RuntimeError(f"Canvas API HTTP {e.code}: {err_msg}")
-
-def canvas_list_courses() -> str:
-    try:
-        courses = _canvas_api_request("/courses?enrollment_state=active&include[]=term")
-        if not courses:
-            return "No active enrolled courses found on Canvas."
-
-        output = []
-        for c in courses:
-            c_id = c.get("id")
-            c_name = c.get("name") or c.get("course_code") or "Untitled Course"
-            c_code = c.get("course_code", "")
-            term = c.get("term", {}).get("name", "Current Term")
-            output.append(f"- [{c_id}] {c_name} (Code: {c_code}, Term: {term})")
-        return "\n".join(output)
-    except Exception as e:
-        return f"Failed to list Canvas courses: {str(e)}"
-
-def canvas_get_assignment_rubric(course_id: str, search_query: Optional[str] = None) -> str:
-    try:
-        endpoint = f"/courses/{course_id}/assignments?include[]=rubric&order_by=due_at"
-        assignments = _canvas_api_request(endpoint)
-        if not assignments:
-            return f"No assignments found for course ID {course_id}."
-
-        matches = []
-        for a in assignments:
-            title = a.get("name", "Untitled")
-            if search_query and search_query.lower() not in title.lower():
-                continue
-
-            a_id = a.get("id")
-            due_at = a.get("due_at", "No due date specified")
-            points = a.get("points_possible", "N/A")
-            
-            desc_raw = a.get("description", "") or "No description provided."
-            clean_desc = re.sub(r'<[^>]+>', ' ', desc_raw)
-            clean_desc = " ".join(clean_desc.split())[:350]
-
-            rubric = a.get("rubric", [])
-            rubric_details = []
-            if rubric:
-                for crit in rubric:
-                    c_desc = crit.get("description", "Criterion")
-                    c_pts = crit.get("points", 0)
-                    ratings = [f"{r.get('description', '')} ({r.get('points')} pts)" for r in crit.get("ratings", [])]
-                    rubric_details.append(f"  * {c_desc} [Max: {c_pts} pts]: {', '.join(ratings)}")
-                rubric_block = "\n".join(rubric_details)
-            else:
-                rubric_block = "  No structured rubric attached to this assignment."
-
-            matches.append(
-                f"### {title} (ID: {a_id})\n"
-                f"- **Due Date:** {due_at}\n"
-                f"- **Points:** {points}\n"
-                f"- **Description Snippet:** {clean_desc}...\n\n"
-                f"**Grading Rubric:**\n{rubric_block}\n"
-            )
-
-        if not matches:
-            return f"No assignments matched '{search_query}' in course {course_id}."
-
-        return "\n\n".join(matches[:4])
-    except Exception as e:
-        return f"Failed to fetch Canvas rubric: {str(e)}"
-
-def canvas_get_submission_grades(course_id: str, assignment_id: Optional[str] = None) -> str:
-    try:
-        if assignment_id:
-            endpoint = f"/courses/{course_id}/assignments/{assignment_id}/submissions/self?include[]=submission_comments&include[]=rubric_assessment"
-            sub = _canvas_api_request(endpoint)
-            submissions = [sub] if sub else []
-        else:
-            endpoint = f"/courses/{course_id}/students/submissions/self?include[]=assignment&include[]=submission_comments&include[]=rubric_assessment&per_page=10"
-            try:
-                submissions = _canvas_api_request(endpoint)
-            except Exception:
-                endpoint = f"/courses/{course_id}/assignments?include[]=submission"
-                assigns = _canvas_api_request(endpoint)
-                submissions = [a.get("submission") for a in assigns if a.get("submission")]
-
-        if not submissions:
-            return f"No submissions found for course {course_id}."
-
-        results = []
-        for s in submissions:
-            a_info = s.get("assignment", {})
-            a_name = a_info.get("name") or f"Assignment #{s.get('assignment_id')}"
-            state = s.get("workflow_state", "unsubmitted")
-            score = s.get("score")
-            grade = s.get("grade")
-            sub_at = s.get("submitted_at") or "Not submitted"
-
-            comments = []
-            for c in s.get("submission_comments", []):
-                author = c.get("author_name", "Instructor")
-                comment_text = c.get("comment", "")
-                comments.append(f"  * [{author}]: {comment_text}")
-            comment_block = "\n".join(comments) if comments else "  No instructor comments."
-
-            rubric_assess = s.get("rubric_assessment", {})
-            rubric_eval = []
-            if rubric_assess:
-                for crit_id, eval_data in rubric_assess.items():
-                    r_pts = eval_data.get("points")
-                    r_comments = eval_data.get("comments", "")
-                    rubric_eval.append(f"  * Criterion {crit_id}: {r_pts} pts - {r_comments}")
-                rubric_eval_block = "\n".join(rubric_eval)
-            else:
-                rubric_eval_block = "  No rubric breakdown evaluated."
-
-            results.append(
-                f"### {a_name}\n"
-                f"- **Status:** {state.upper()}\n"
-                f"- **Score:** {score} | **Grade:** {grade}\n"
-                f"- **Submitted:** {sub_at}\n"
-                f"- **Feedback:**\n{comment_block}\n"
-                f"- **Rubric Assessment:**\n{rubric_eval_block}\n"
-            )
-
-        return "\n\n".join(results[:4])
-    except Exception as e:
-        return f"Failed to retrieve submission grades: {str(e)}"
-
-# ==============================================================================
-# Gmail Tools
-# ==============================================================================
-
-def gmail_search_messages(query: str = "is:unread", max_results: int = 5) -> str:
-    service = get_gmail_service()
-    if not service:
-        return "Gmail integration is not active or Google credentials are missing."
-
-    try:
-        results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
-        messages = results.get("messages", [])
-
-        if not messages:
-            return f"No messages found matching search query: '{query}'."
-
-        summaries = []
-        for m in messages:
-            msg_id = m["id"]
-            msg_detail = service.users().messages().get(
-                userId="me", id=msg_id, format="metadata",
-                metadataHeaders=["From", "Subject", "Date"]
-            ).execute()
-            
-            headers = {h["name"]: h["value"] for h in msg_detail.get("payload", {}).get("headers", [])}
-            sender = headers.get("From", "Unknown Sender")
-            subject = headers.get("Subject", "(No Subject)")
-            date = headers.get("Date", "")
-            snippet = msg_detail.get("snippet", "")
-
-            summaries.append(f"- **From:** {sender}\n  **Subject:** {subject}\n  **Date:** {date}\n  **Snippet:** {snippet}")
-
-        return "\n\n".join(summaries)
-    except Exception as e:
-        return f"Error querying Gmail: {str(e)}"
-
-def gmail_read_message(message_id: str) -> str:
-    service = get_gmail_service()
-    if not service:
-        return "Gmail integration is not active."
-
-    try:
-        msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        
-        sender = headers.get("From", "Unknown")
-        subject = headers.get("Subject", "No Subject")
-        date = headers.get("Date", "")
-        snippet = msg.get("snippet", "")
-
-        return (
-            f"### Email Message Details\n"
-            f"- **ID:** {message_id}\n"
-            f"- **From:** {sender}\n"
-            f"- **Subject:** {subject}\n"
-            f"- **Date:** {date}\n\n"
-            f"**Content / Body:**\n{snippet}"
-        )
-    except Exception as e:
-        return f"Error reading message {message_id}: {str(e)}"
-
-def gmail_create_draft(to_address: str, subject: str, body_text: str) -> str:
-    service = get_gmail_service()
-    if not service:
-        return "Gmail integration is not active."
-
-    try:
-        message = EmailMessage()
-        message["To"] = to_address
-        message["Subject"] = subject
-        message.set_content(body_text)
-
-        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        create_message = {"message": {"raw": encoded_message}}
-
-        draft = service.users().drafts().create(userId="me", body=create_message).execute()
-        draft_id = draft.get("id")
-        return f"Draft created successfully in Gmail! (Draft ID: {draft_id})\nRecipient: {to_address}\nSubject: {subject}"
-    except Exception as e:
-        return f"Error creating Gmail draft: {str(e)}"
-
-# ==============================================================================
-# Google Calendar & Resilient Search Tools
-# ==============================================================================
-
-def web_search_tool(query: str, max_results: int = 5) -> str:
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-            if results:
-                output = []
-                for r in results:
-                    title = r.get("title", "Untitled")
-                    body = r.get("body", "No description.")
-                    href = r.get("href", "")
-                    output.append(f"**[{title}]({href})**\n{body}")
-                return "\n\n".join(output)
-    except Exception:
-        pass
-
-    try:
-        clean_q = urllib.parse.quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={clean_q}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            raw_html = resp.read().decode("utf-8", errors="ignore")
-
-        snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', raw_html, re.DOTALL)
-        titles = re.findall(r'<a class="result__url[^>]*href="([^"]*)"[^>]*>(.*?)</a>', raw_html, re.DOTALL)
-
-        parsed = []
-        for i in range(min(max_results, len(snippets))):
-            clean_snip = re.sub(r'<[^>]+>', '', snippets[i]).strip()
-            clean_title = re.sub(r'<[^>]+>', '', titles[i][1]).strip() if i < len(titles) else "News Item"
-            if clean_snip:
-                parsed.append(f"**{clean_title}**\n{clean_snip}")
-
-        if parsed:
-            return "\n\n".join(parsed)
-    except Exception as e:
-        return f"Live web search execution failed: {str(e)}"
-
-    return f"No active search matches returned for query: '{query}'."
-
-def fetch_raw_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 25) -> List[Dict[str, Any]]:
-    service = get_calendar_service()
-    if not service:
-        return []
-
-    try:
-        now = time_min_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
-        calendar_list = service.calendarList().list().execute().get('items', [])
-        if not calendar_list:
-            calendar_list = [{'id': 'primary', 'summary': 'Primary'}]
-
-        all_events = []
-        for cal in calendar_list:
-            cal_id = cal.get('id')
-            cal_name = cal.get('summary', 'Calendar')
-
-            try:
-                events_result = service.events().list(
-                    calendarId=cal_id,
-                    timeMin=now,
-                    maxResults=max_results,
-                    singleEvents=True,
-                    orderBy='startTime'
-                ).execute()
-
-                for item in events_result.get('items', []):
-                    start_val = item.get('start', {}).get('dateTime', item.get('start', {}).get('date'))
-                    all_events.append({
-                        'calendar': cal_name,
-                        'summary': item.get('summary', 'Untitled Event'),
-                        'start': start_val,
-                        'id': item.get('id')
-                    })
-            except Exception:
-                continue
-
-        all_events.sort(key=lambda x: x['start'] if x['start'] else "")
-        return all_events[:max_results]
-    except Exception:
-        return []
-
-def list_calendar_events(time_min_iso: Optional[str] = None, max_results: int = 15) -> str:
-    events = fetch_raw_calendar_events(time_min_iso, max_results)
-    if not events:
-        return "No upcoming events found on connected calendars or integration is inactive."
-    result = [f"- **[{e['calendar']}]** {e['summary']} *(Starts: {e['start']})*" for e in events]
-    return "\n".join(result)
-
-def create_calendar_event(summary: str, start_time_iso: str, end_time_iso: str, description: Optional[str] = "") -> str:
-    service = get_calendar_service()
-    if not service:
-        return "Google Calendar integration is not active or credentials are missing."
-    try:
-        formatted_start = _normalize_iso_time(start_time_iso)
-        formatted_end = _normalize_iso_time(end_time_iso)
-
-        event = {
-            'summary': summary,
-            'description': description or "",
-            'start': {'dateTime': formatted_start},
-            'end': {'dateTime': formatted_end},
-        }
-        created = service.events().insert(calendarId='primary', body=event).execute()
-        return f"Event created successfully: '{created.get('summary')}' (ID: {created.get('id')})"
-    except Exception as err:
-        return f"Error creating event: {str(err)}"
-
-def update_calendar_event(event_id: str, summary: Optional[str] = None, start_time_iso: Optional[str] = None, end_time_iso: Optional[str] = None) -> str:
-    service = get_calendar_service()
-    if not service:
-        return "Google Calendar integration is not active or credentials are missing."
-    try:
-        event = service.events().get(calendarId='primary', eventId=event_id).execute()
-        if summary:
-            event['summary'] = summary
-        if start_time_iso:
-            event['start'] = {'dateTime': _normalize_iso_time(start_time_iso)}
-        if end_time_iso:
-            event['end'] = {'dateTime': _normalize_iso_time(end_time_iso)}
-        updated = service.events().update(calendarId='primary', eventId=event_id, body=event).execute()
-        return f"Event updated successfully: '{updated.get('summary')}'"
-    except Exception as err:
-        return f"Error updating event: {str(err)}"
-
-def delete_calendar_event(event_id: str) -> str:
-    service = get_calendar_service()
-    if not service:
-        return "Google Calendar integration is not active or credentials are missing."
-    try:
-        service.events().delete(calendarId='primary', eventId=event_id).execute()
-        return f"Event {event_id} deleted successfully."
-    except Exception as err:
-        return f"Error deleting event: {str(err)}"
-
-# ==============================================================================
-# GitHub Integration Tools
-# ==============================================================================
-
-def _github_api_request(endpoint: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None) -> Any:
-    if not GITHUB_TOKEN:
-        raise ValueError("GITHUB_TOKEN is not configured in environment variables.")
-
-    url = f"https://api.github.com{endpoint}"
-    data_bytes = json.dumps(payload).encode("utf-8") if payload else None
-    
-    req = urllib.request.Request(url, data=data_bytes, method=method)
-    req.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "ARGUS-Assistant")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if payload:
-        req.add_header("Content-Type", "application/json")
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            content = resp.read().decode("utf-8")
-            return json.loads(content) if content else {}
-    except urllib.error.HTTPError as e:
-        err_msg = e.read().decode("utf-8")
-        raise RuntimeError(f"GitHub API {e.code} error: {err_msg}")
-
-def github_list_repos(limit: int = 15) -> str:
-    try:
-        data = _github_api_request(f"/user/repos?sort=updated&per_page={limit}")
-        if not data:
-            return "No repositories found for this account."
-        repos = [f"- **{r['full_name']}** (Private: {r['private']}, Description: {r['description'] or 'None'})" for r in data]
-        return "\n".join(repos)
-    except Exception as e:
-        return f"Failed to list GitHub repositories: {str(e)}"
-
-def github_get_tree(repo: str, branch: str = "main", path_prefix: Optional[str] = None) -> str:
-    owner = GITHUB_DEFAULT_OWNER
-    if "/" in repo:
-        owner, repo = repo.split("/", 1)
-    try:
-        data = _github_api_request(f"/repos/{owner}/{repo}/git/trees/{branch}?recursive=1")
-        tree = data.get("tree", [])
-        if not tree:
-            return f"No files detected on branch '{branch}' for {owner}/{repo}."
-
-        files = []
-        for item in tree:
-            p = item.get("path", "")
-            if path_prefix and not p.startswith(path_prefix.strip("/")):
-                continue
-            item_type = "DIR " if item.get("type") == "tree" else "FILE"
-            files.append(f"[{item_type}] {p}")
-
-        return "\n".join(files[:40]) if files else f"No files matching prefix '{path_prefix}'."
-    except Exception as e:
-        return f"Failed to fetch directory tree: {str(e)}"
-
-def github_read_file(repo: str, path: str, branch: str = "main") -> str:
-    owner = GITHUB_DEFAULT_OWNER
-    if "/" in repo:
-        owner, repo = repo.split("/", 1)
-    clean_path = path.strip("/")
-    try:
-        data = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
-        if data.get("encoding") == "base64" and data.get("content"):
-            decoded = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-            if len(decoded) > 1500:
-                decoded = decoded[:1500] + "\n...[truncated for context limits]..."
-            return f"```\n{decoded}\n```"
-        return f"File found but unexpected encoding or directory: {clean_path}"
-    except Exception as e:
-        return f"Failed to read file '{path}': {str(e)}"
-
-def github_write_file(repo: str, path: str, content: str, commit_message: str, branch: str = "main") -> str:
-    owner = GITHUB_DEFAULT_OWNER
-    if "/" in repo:
-        owner, repo = repo.split("/", 1)
-    clean_path = path.strip("/")
-    sha = None
-
-    try:
-        existing = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}?ref={branch}")
-        sha = existing.get("sha")
-    except Exception:
-        pass
-
-    payload: Dict[str, Any] = {
-        "message": commit_message,
-        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
-        "branch": branch
-    }
-    if sha:
-        payload["sha"] = sha
-
-    try:
-        resp = _github_api_request(f"/repos/{owner}/{repo}/contents/{clean_path}", method="PUT", payload=payload)
-        commit_sha = resp.get("commit", {}).get("sha", "")[:7]
-        return f"Successfully committed '{clean_path}' to {owner}/{repo} on branch '{branch}' (Commit: {commit_sha})."
-    except Exception as e:
-        return f"Failed to commit file '{path}': {str(e)}"
-
-def github_create_issue(repo: str, title: str, body: Optional[str] = "") -> str:
-    owner = GITHUB_DEFAULT_OWNER
-    if "/" in repo:
-        owner, repo = repo.split("/", 1)
-    payload = {"title": title, "body": body or ""}
-    try:
-        resp = _github_api_request(f"/repos/{owner}/{repo}/issues", method="POST", payload=payload)
-        return f"Issue created: #{resp.get('number')} '{resp.get('title')}' ({resp.get('html_url')})"
-    except Exception as e:
-        return f"Failed to create issue: {str(e)}"
-
-# ==============================================================================
-# Reservation & Executive Briefing Engines
-# ==============================================================================
-
-def check_schedule_conflict(target_time_iso: str, duration_minutes: int = 120) -> str:
-    try:
-        normalized = _normalize_iso_time(target_time_iso)
-        target_dt = datetime.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-    except Exception:
-        return "Invalid ISO format for target_time_iso."
-
-    end_dt = target_dt + datetime.timedelta(minutes=duration_minutes)
-    search_start = (target_dt - datetime.timedelta(hours=3)).isoformat()
-    events = fetch_raw_calendar_events(time_min_iso=search_start, max_results=10)
-
-    conflicts = []
-    for e in events:
-        start_str = e.get("start")
-        if not start_str:
-            continue
-        try:
-            ev_start = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            ev_end = ev_start + datetime.timedelta(minutes=60)
-            if max(target_dt, ev_start) < min(end_dt, ev_end):
-                conflicts.append(f"[{e['calendar']}] {e['summary']} at {ev_start.strftime('%I:%M %p')}")
-        except Exception:
-            continue
-
-    if conflicts:
-        return f"CONFLICT DETECTED: You have existing commitments during that window:\n" + "\n".join(conflicts)
-    return "CLEAR: No scheduling conflicts detected on your calendars for this window."
-
-def restaurant_reservation_tool(restaurant_name: str, location: str, party_size: int, date_str: str, time_str: str) -> str:
-    search_query = f"{restaurant_name} {location} reservations OpenTable Resy phone address"
-    search_info = web_search_tool(search_query, max_results=3)
-
-    encoded_name = urllib.parse.quote(restaurant_name)
-    encoded_loc = urllib.parse.quote(location)
-    
-    opentable_link = f"https://www.opentable.com/s?term={encoded_name}&dateTime={date_str}T{time_str.replace(':', '%3A')}&covers={party_size}"
-    resy_link = f"https://resy.com/cities?query={encoded_name}"
-    google_reserve_link = f"https://www.google.com/maps/search/{encoded_name}+{encoded_loc}"
-
-    try:
-        dt_start = datetime.datetime.fromisoformat(f"{date_str}T{time_str}:00")
-        dt_end = dt_start + datetime.timedelta(hours=2)
-        start_iso = dt_start.isoformat()
-        end_iso = dt_end.isoformat()
-        
-        cal_summary = f"RESERVATION (HOLD): {restaurant_name} (Party of {party_size})"
-        cal_desc = f"Reservation for {party_size} at {restaurant_name}.\nLocation: {location}\nOpenTable: {opentable_link}\nResy: {resy_link}\n\nSearch Intel:\n{search_info[:350]}"
-        
-        cal_result = create_calendar_event(cal_summary, start_iso, end_iso, description=cal_desc)
-    except Exception as e:
-        cal_result = f"Could not create calendar placeholder: {str(e)}"
-
-    return (
-        f"### RESERVATION DIRECTIVE PREPARED\n\n"
-        f"- **Venue:** {restaurant_name} ({location})\n"
-        f"- **Party Size:** {party_size}\n"
-        f"- **Time Window:** {date_str} at {time_str}\n"
-        f"- **Calendar Hold:** {cal_result}\n\n"
-        f"**Direct Booking Portals:**\n"
-        f"1. [OpenTable Portal]({opentable_link})\n"
-        f"2. [Resy Portal]({resy_link})\n"
-        f"3. [Google Maps / Reserve]({google_reserve_link})\n\n"
-        f"**Venue Intel:**\n{search_info[:400]}"
-    )
-
-def executive_briefing_tool(location: Optional[str] = "Philadelphia, PA") -> str:
-    target_loc = location.strip() if location and location.strip() else "Philadelphia, PA"
-    now = datetime.datetime.now()
-    today_str = now.strftime("%A, %B %d, %Y")
-    
-    weather_intel = get_weather(target_loc)
-    gmail_intel = gmail_search_messages(query="is:unread", max_results=4)
-
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone().isoformat()
-    agenda_events = fetch_raw_calendar_events(time_min_iso=start_of_day, max_results=10)
-
-    agenda_lines = []
-    if agenda_events:
-        for ev in agenda_events:
-            cal_label = ev.get("calendar", "Calendar")
-            summary = ev.get("summary", "Event")
-            start = ev.get("start", "")
-            agenda_lines.append(f"- **[{cal_label}]** {summary} *(Starts: {start})*")
-        agenda_block = "\n".join(agenda_lines)
-    else:
-        agenda_block = "No events, deadlines, or exams scheduled for the next 48 hours."
-
-    return (
-        f"## EXECUTIVE BRIEFING FOR {today_str.upper()}\n\n"
-        f"### Local Weather ({target_loc})\n{weather_intel}\n\n"
-        f"### Actionable Inbox // Unread Messages\n{gmail_intel}\n\n"
-        f"### Canvas & Google Calendar // Next 48 Hours\n{agenda_block}\n"
-    )
-
-def dispatch_contact_message(recipient_name: str, message_body: str) -> str:
-    """Prepares an outbound SMS message to be dispatched to a personal contact."""
-    return f"Prepared SMS dispatch to {recipient_name}: '{message_body}'"
-
-# ==============================================================================
-# Tool Schema Declarations & Dispatch
-# ==============================================================================
-
-tools_schema = [
-    {
-        "type": "function",
-        "function": {
-            "name": "dispatch_contact_message",
-            "description": "Used when the user requests to text, SMS, or message an individual person from their personal iPhone contacts list.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "recipient_name": {
-                        "type": "string",
-                        "description": "The exact first or full name of the contact as saved in the phone book (e.g., 'Bryant Basketball', 'Mom', 'Alex')."
-                    },
-                    "message_body": {
-                        "type": "string",
-                        "description": "The text message content to send."
-                    }
-                },
-                "required": ["recipient_name", "message_body"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "executive_briefing_tool",
-            "description": "Compiles a complete morning briefing chaining live weather, unread emails from Gmail, and upcoming Canvas & Google Calendar events.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "City and state for weather lookup. Defaults to 'Philadelphia, PA' if null or omitted."
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "exec_briefing_tool",
-            "description": "Alias for executive_briefing_tool. Compiles an executive briefing of weather, unread emails, and schedule.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "City and state for weather lookup. Defaults to 'Philadelphia, PA'."
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get current weather conditions and forecast for a given location.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City name, zip code, or region"}
-                },
-                "required": ["location"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "canvas_list_courses",
-            "description": "Lists active enrolled courses on Canvas with their unique Course IDs and terms.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "canvas_get_assignment_rubric",
-            "description": "Retrieves assignment instructions, prompts, points, and grading rubrics for a specific Canvas course.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "course_id": {"type": "string", "description": "The unique numerical Canvas course ID."},
-                    "search_query": {"type": "string", "description": "Optional keyword or assignment title filter (e.g. 'Lab 2', 'Project 1')."}
-                },
-                "required": ["course_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "canvas_get_submission_grades",
-            "description": "Checks student assignment submissions, earned scores, letter grades, rubric evaluation breakdowns, and instructor feedback.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "course_id": {"type": "string", "description": "The numerical Canvas course ID."},
-                    "assignment_id": {"type": "string", "description": "Optional specific numerical assignment ID. If omitted, returns recent submissions."}
-                },
-                "required": ["course_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "gmail_search_messages",
-            "description": "Searches Gmail for emails matching a query.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Gmail search query syntax."},
-                    "max_results": {"type": "integer"}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "gmail_read_message",
-            "description": "Reads details and content of a specific email by its message ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message_id": {"type": "string"}
-                },
-                "required": ["message_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "gmail_create_draft",
-            "description": "Creates an email draft in Gmail.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to_address": {"type": "string"},
-                    "subject": {"type": "string"},
-                    "body_text": {"type": "string"}
-                },
-                "required": ["to_address", "subject", "body_text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "restaurant_reservation_tool",
-            "description": "Prepares and executes a restaurant reservation.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "restaurant_name": {"type": "string"},
-                    "location": {"type": "string"},
-                    "party_size": {"type": "integer"},
-                    "date_str": {"type": "string"},
-                    "time_str": {"type": "string"}
-                },
-                "required": ["restaurant_name", "location", "party_size", "date_str", "time_str"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_schedule_conflict",
-            "description": "Checks if the user has an existing class, exam, or event that conflicts with a proposed time.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target_time_iso": {"type": "string"},
-                    "duration_minutes": {"type": "integer"}
-                },
-                "required": ["target_time_iso"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "github_list_repos",
-            "description": "Lists repositories in the user's GitHub account.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer"}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "github_get_tree",
-            "description": "Lists all folders and files inside a GitHub repo.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {"type": "string"},
-                    "branch": {"type": "string"},
-                    "path_prefix": {"type": "string"}
-                },
-                "required": ["repo"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "github_read_file",
-            "description": "Reads and inspects code or text from any file in a GitHub repository.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {"type": "string"},
-                    "path": {"type": "string"},
-                    "branch": {"type": "string"}
-                },
-                "required": ["repo", "path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "github_write_file",
-            "description": "Creates or updates a file in GitHub with a commit.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {"type": "string"},
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                    "commit_message": {"type": "string"},
-                    "branch": {"type": "string"}
-                },
-                "required": ["repo", "path", "content", "commit_message"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "github_create_issue",
-            "description": "Creates a new issue on a GitHub repository.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo": {"type": "string"},
-                    "title": {"type": "string"},
-                    "body": {"type": "string"}
-                },
-                "required": ["repo", "title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search_tool",
-            "description": "Search the live web for real-time info.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_fact_tool",
-            "description": "Permanently save a user fact into long-term memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "fact": {"type": "string"},
-                    "category": {"type": "string"}
-                },
-                "required": ["fact"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_calendar_events",
-            "description": "Lists upcoming events across all calendars.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "time_min_iso": {"type": "string"},
-                    "max_results": {"type": "integer"}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_calendar_event",
-            "description": "Creates a new event on the primary calendar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {"type": "string"},
-                    "start_time_iso": {"type": "string"},
-                    "end_time_iso": {"type": "string"},
-                    "description": {"type": "string"}
-                },
-                "required": ["summary", "start_time_iso", "end_time_iso"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_calendar_event",
-            "description": "Updates an existing event on the primary Google Calendar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "event_id": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "start_time_iso": {"type": "string"},
-                    "end_time_iso": {"type": "string"}
-                },
-                "required": ["event_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_calendar_event",
-            "description": "Deletes an event from the primary Google Calendar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "event_id": {"type": "string"}
-                },
-                "required": ["event_id"]
-            }
-        }
-    }, 
-    {
-        "type": "function",
-        "function": {
-            "name": "send_iphone_push",
-            "description": "Sends an instant high-priority alert or notification directly to the user's iPhone lock screen.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Short headline for the alert banner."},
-                    "message": {"type": "string", "description": "Body message or brief to transmit."}
-                },
-                "required": ["title", "message"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "google_search_grounding",
-            "description": "Performs an authoritative live web search using Google Search Grounding. Use for real-time news, current sports scores, research papers, documentation, or facts requiring live verification.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The precise search query."
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "google_search_tool",
-            "description": "Alias for google_search_grounding. Performs an authoritative live web search using Google Search Grounding.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query."
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "drive_search_tool",
-            "description": "Searches Google Drive and Google Docs by keyword across file titles and full body content. Use when the user asks to find, search, or look up notes, slides, documents, or coursework stored in Drive.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search keyword, topic, or document title."
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of files to return (default 5)."
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_client_website_tool",
-            "description": "Generates a responsive, modern demo landing page for a local business (food, home services, contractors, retail) and deploys it to a live preview URL for pitch outreach.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "business_name": {
-                        "type": "string",
-                        "description": "Name of the business (e.g., 'Angelo\\'s Pizzeria')"
-                    },
-                    "niche": {
-                        "type": "string",
-                        "description": "Type of business (e.g., 'Italian Restaurant', 'HVAC & Plumbing')"
-                    },
-                    "location": {
-                        "type": "string",
-                        "description": "City or service area (e.g., 'South Philadelphia, PA')"
-                    },
-                    "contact_phone": {
-                        "type": ["string", "null"],
-                        "description": "Optional phone number. Pass null or empty string if unknown."
-                    },
-                    "highlights": {
-                        "type": ["string", "null"],
-                        "description": "Key services, menu items, or value propositions. Pass null if none provided."
-                    }
-                },
-                "required": ["business_name", "niche", "location"]
-            }
-        }
-    },
-]
-
-tool_dispatch = {
-    "dispatch_contact_message": dispatch_contact_message,
-    "executive_briefing_tool": executive_briefing_tool,
-    "exec_briefing_tool": executive_briefing_tool,
-    "get_weather": get_weather,
-    "canvas_list_courses": canvas_list_courses,
-    "canvas_get_assignment_rubric": canvas_get_assignment_rubric,
-    "canvas_get_submission_grades": canvas_get_submission_grades,
-    "gmail_search_messages": gmail_search_messages,
-    "gmail_read_message": gmail_read_message,
-    "gmail_create_draft": gmail_create_draft,
-    "restaurant_reservation_tool": restaurant_reservation_tool,
-    "check_schedule_conflict": check_schedule_conflict,
-    "github_list_repos": github_list_repos,
-    "github_get_tree": github_get_tree,
-    "github_read_file": github_read_file,
-    "github_write_file": github_write_file,
-    "github_create_issue": github_create_issue,
-    "web_search_tool": web_search_tool,
-    "save_fact_tool": save_fact_tool,
-    "list_calendar_events": list_calendar_events,
-    "create_calendar_event": create_calendar_event,
-    "update_calendar_event": update_calendar_event,
-    "delete_calendar_event": delete_calendar_event,
-    "send_iphone_push": send_iphone_push, 
-    "google_search_grounding": google_search_grounding,
-    "google_search_tool": google_search_grounding,
-    "web_search_tool": google_search_grounding,
-    "drive_search_tool": drive_search_tool,
-    "generate_client_website_tool": generate_client_website_tool
-}
-
-# ==============================================================================
-# Endpoints
-# ==============================================================================
-
-class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-
-class ChatResponse(BaseModel):
-    reply: str
-    session_id: str
-    action: Optional[str] = "reply"
-    recipient: Optional[str] = None
-    body: Optional[str] = None
-
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "service": "ARGUS", "model": GROQ_MODEL}
-
-@app.get("/history/{session_id}")
-def get_session_history(session_id: str, token: str = Depends(verify_token)):
-    return {"history": get_history(session_id, limit=30)}
-
-@app.get("/memories")
-def get_all_memories(token: str = Depends(verify_token)):
-    return {"memories": get_all_memories_records()}
-
-@app.delete("/memories/{memory_id}")
-def delete_memory(memory_id: int, token: str = Depends(verify_token)):
-    success = delete_memory_by_id(memory_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Memory record not found.")
-    return {"status": "deleted", "id": memory_id}
-
-@app.get("/agenda")
-def get_agenda(token: str = Depends(verify_token)):
-    events = fetch_raw_calendar_events(max_results=20)
-    return {"events": events}
-
-@app.post("/transcribe")
-@app.post("/transcribe/")
-async def transcribe_audio(
-    file: UploadFile = File(...),
-    token: str = Depends(verify_token)
-):
-    if not groq_client:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured in environment.")
-
-    try:
-        audio_bytes = await file.read()
-        byte_len = len(audio_bytes) if audio_bytes else 0
-
-        if not audio_bytes or byte_len < 1400:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Audio sample contains only container headers ({byte_len} bytes). Please speak before clicking stop."
-            )
-
-        filename = file.filename or "recording.webm"
-        
-        transcription = groq_client.audio.transcriptions.create(
-            file=(filename, audio_bytes),
-            model="whisper-large-v3",
-            prompt="Voice command directed to personal AI assistant ARGUS.",
-            response_format="text",
-            temperature=0.0
-        )
-        
-        text = str(transcription).strip()
-        cleaned_lower = text.lower().rstrip(".!?, ")
-
-        hallucination_blacklist = {"you", "thank you", "thanks", "subtitles by", "thank you for watching", "bye"}
-        if cleaned_lower in hallucination_blacklist or len(cleaned_lower) <= 1:
-            return {"text": ""}
-
-        return {"text": text}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Audio transcription error: {str(e)}")
-
-# ==============================================================================
-# Core Chat & Deterministic Execution Pipeline
-# ==============================================================================
-
-@app.post("/chat", response_model=ChatResponse)
-@app.post("/chat/", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, token: str = Depends(verify_token)):
-    if not groq_client:
-        return ChatResponse(reply="GROQ_API_KEY is not configured on the backend.", session_id=request.session_id or "")
-
-    session_id = request.session_id or "default_session"
-    user_input = request.message.strip()
-
-    # Fast-path intent heuristics for voice and text shorthand
-    clean_lower = user_input.lower().strip()
-    
-    # Texting / Messaging intents
-    # Matches: "tell [Name] ...", "text [Name] ...", "msg [Name] ...", "let [Name] know ..."
-    msg_match = re.match(r'^(?:yo argus[, ]*)?(?:tell|text|msg|message|send a text to|let)\s+([a-zA-Z0-9\s]+?)\s+(?:that|to|saying|:)?\s*(.+)$', clean_lower, re.IGNORECASE)
-    
-    # If a clear text directive is detected and Groq might bypass it, enforce tool choice
-    force_tool_choice = "auto"
-    if any(clean_lower.startswith(prefix) for prefix in ["text ", "tell ", "msg ", "message "]):
-        force_tool_choice = {"type": "function", "function": {"name": "dispatch_contact_message"}}
-
-    # ADD THIS: Force website generator tool on web design directives
-    web_keywords = ["website", "landing page", "demo site", "web page"]
-    action_keywords = ["generate", "create", "build", "make", "deploy"]
-    if any(act in clean_lower for act in action_keywords) and any(web in clean_lower for web in web_keywords):
-        match = re.search(r'(?:for|of)\s+([A-Za-z0-9\s\'\-]+?)(?:\s+in\s+([A-Za-z0-9\s,\.\-]+?))?(?:\s+(?:featuring|specializing in|offering|with)\s+(.+))?$', user_input, re.IGNORECASE)
-        
-        biz_name = match.group(1).strip() if match else "Local Business"
-        loc = match.group(2).strip() if (match and match.group(2)) else "Philadelphia, PA"
-        highlights = match.group(3).strip() if (match and match.group(3)) else "Locally owned, 5-star customer reviews"
-        niche = "Italian Restaurant & Pizzeria" if any(w in clean_lower for w in ["pizza", "pizzeria", "hoagie", "food", "pasta"]) else "Contractor & Home Services"
-        
-        tool_result = generate_client_website_tool(
-            business_name=biz_name,
-            niche=niche,
-            location=loc,
-            contact_phone=None,
-            highlights=highlights
-        )
-        save_message(session_id, "user", user_input)
-        save_message(session_id, "assistant", tool_result)
-        return ChatResponse(reply=tool_result, session_id=session_id)
-
-
-    # Define timestamps and memory facts BEFORE building system_prompt
-    current_time_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    facts = list_facts()
-    facts_block = "\n".join([f"- {f}" for f in facts]) if facts else "No permanent facts recorded yet."
-
-    system_prompt = (
-        f"You are ARGUS, an adaptive autonomous executive AI assistant. Current time: {current_time_str}.\n"
-        "You possess advanced intent detection trained on conversational speech-to-text dictation and fast keyboard texting.\n\n"
-        "=== COMMUNICATION & INTENT INTERPRETATION PROTOCOL ===\n"
-        "- **Speech Dictation Adaptation**: The user may dictate hands-free via voice, resulting in run-on sentences, phonetic slips, or filler words ('yo ARGUS', 'uh', 'like', 'can you just go ahead and'). Strip conversational padding and isolate the underlying directive.\n"
-        "- **Keyboard Texting / Shorthand Adaptation**: The user may text informally using slang, abbreviations, or shorthand (e.g., 'aight', 'imma', 'hmu', 'sched', 'msg', 'tmrw', 'rn', 'wuts'). Interpret these fluently without lecturing or asking for rephrasing.\n"
-        "- **Ambiguous Contact Directives**: Phrasings like 'tell Bryant we hit the gym at 6', 'let Mom know I'm on the way', 'text alex whats up' MUST be resolved directly as `dispatch_contact_message`.\n"
-        "- **Contextual Summaries**: If the user says 'summarize it', 'clean that up', or 'break that down' following a data fetch or search, synthesize existing chat history into executive bullet points without invoking web search tools again.\n\n"
-        "=== PERMANENT LONG-TERM FACTS (GROUND TRUTH) ===\n"
-        f"{facts_block}\n"
-        "===============================================\n\n"
-        "OPERATIONAL DIRECTIVES:\n"
-        "1. For texting/messaging people: call 'dispatch_contact_message' with exact contact name and cleaned message body.\n"
-        "2. For briefings/morning updates/day overviews: call 'executive_briefing_tool'.\n"
-        "3. For real-time facts/sports/news: call 'google_search_grounding'.\n"
-        "4. Output format: Clear, concise executive markdown with bold highlights and structured lists."
-    )
-
-    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    
-    # Load clean history records from SQLite
-    history_records = get_history(session_id, limit=6)
-    for r in history_records:
-        role_label = "user" if r["role"] == "user" else "assistant"
-        messages.append({"role": role_label, "content": r["content"]})
-
-    messages.append({"role": "user", "content": user_input})
-    save_message(session_id, "user", user_input)
-
-# Guarantee system prompt at index 0 and no more than the last 4 recent exchanges
-    if len(messages) > 6:
-        messages = [messages[0]] + messages[-5:]
-
-    reply_text = ""
-    max_turns = 4
-    turn_count = 0
-    contact_action = None
-    contact_recipient = None
-    contact_body = None
-
-    try:
-        # Guarantee system prompt at index 0 and no more than the last 4 recent exchanges
-        if len(messages) > 5:
-            messages = [messages[0]] + messages[-4:]
-        while turn_count < max_turns:
-            turn_count += 1
-            response = None
-
-            for attempt in range(3):
-                try:
-                    response = groq_client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=messages,
-                        tools=tools_schema,
-                        tool_choice=force_tool_choice,
-                        temperature=0.3
-                    )
-                    break
-                except RateLimitError:
-                    if attempt < 2:
-                        time.sleep(2.0 * (attempt + 1))
-                        continue
-                    reply_text = "Groq rate limit reached. Please wait a moment and try again."
-                    break
-                except Exception as api_err:
-                    err_str = str(api_err)
-                    if "exec_briefing_tool" in err_str:
-                        # Fallback for hallucinated tool name
-                        reply_text = executive_briefing_tool("Philadelphia, PA")
-                        break
-                    if attempt < 2 and "429" in err_str:
-                        time.sleep(2.0)
-                        continue
-                    reply_text = f"Groq API error: {err_str}"
-                    break
-
-            if reply_text or not response or not response.choices:
-                break
-
-            response_msg = response.choices[0].message
-
-            # Case 1: Model returned text without requesting any tools
-            if not response_msg.tool_calls:
-                content = (response_msg.content or "").strip()
-                if not content and hasattr(response_msg, "reasoning_content"):
-                    content = (getattr(response_msg, "reasoning_content") or "").strip()
-
-                if content:
-                    reply_text = content
-                    break
-
-                # Post-tool synthesis turn returned empty content
-                if turn_count > 1:
-                    tool_outputs = [
-                        str(m.get("content", "")) for m in messages 
-                        if isinstance(m, dict) and m.get("role") == "tool"
-                    ]
-                    
-                    try:
-                        clean_synth_messages = list(messages)
-                        clean_synth_messages.append({
-                            "role": "user",
-                            "content": "Synthesize the results above into a clear, direct executive summary."
-                        })
-                        forced_res = groq_client.chat.completions.create(
-                            model=GROQ_MODEL,
-                            messages=clean_synth_messages,
-                            temperature=0.3
-                        )
-                        forced_msg = forced_res.choices[0].message
-                        forced_content = (forced_msg.content or getattr(forced_msg, "reasoning_content", "") or "").strip()
-                        if forced_content:
-                            reply_text = forced_content
-                            break
-                    except Exception as synth_err:
-                        print(f"Forced synthesis error: {synth_err}")
-
-                    if tool_outputs:
-                        reply_text = "\n\n".join(tool_outputs)
-                    else:
-                        reply_text = "Action executed, but no content was returned by the tool."
-                    break
-                else:
-                    reply_text = "Directive received."
-                    break
-
-            # Case 2: Model emitted tool call requests
-            assistant_payload: Dict[str, Any] = {
-                "role": "assistant",
-                "content": response_msg.content or "",
-            }
-            if response_msg.tool_calls:
-                assistant_payload["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in response_msg.tool_calls
-                ]
-
-            messages.append(assistant_payload)
-
-            for tool_call in response_msg.tool_calls:
-                fn_name = tool_call.function.name
-                fn_args = {}
-                if tool_call.function.arguments:
-                    try:
-                        fn_args = json.loads(tool_call.function.arguments)
-                    except Exception:
-                        fn_args = {}
-
-                # Route any search-related hallucinated name to google_search_grounding
-                if "search" in fn_name and fn_name not in tool_dispatch:
-                    fn_name = "google_search_grounding"
-
-                # Intercept contact messaging to immediately package iOS Shortcut payload
-                if fn_name == "dispatch_contact_message":
-                    contact_recipient = fn_args.get("recipient_name", "")
-                    contact_body = fn_args.get("message_body", "")
-                    contact_action = "send_contact_sms"
-                    reply_text = f"Dispatched text to {contact_recipient}."
-                    save_message(session_id, "assistant", reply_text)
-                    return ChatResponse(
-                        reply=reply_text,
-                        session_id=session_id,
-                        action=contact_action,
-                        recipient=contact_recipient,
-                        body=contact_body
-                    )
-
-                if fn_name in tool_dispatch:
-                    try:
-                        # Clean arguments: remove None values so defaults can take effect
-                        clean_fn_args = {k: v for k, v in fn_args.items() if v is not None}
-                        fn_result = tool_dispatch[fn_name](**clean_fn_args)
-                    except Exception as exc:
-                        fn_result = f"Tool failure: {type(exc).__name__} - {str(exc)}"
-                else:
-                    fn_result = f"Error: Tool '{fn_name}' not recognized."
-
-                trimmed_result = str(fn_result)
-                if len(trimmed_result) > 1200:
-                    trimmed_result = trimmed_result[:1200] + "... [truncated]"
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": trimmed_result
-                })
-
-        # Final loop exit guard: surface tool data if reply_text remained empty
-        if not reply_text:
-            tool_outputs = [
-                str(m.get("content", "")) for m in messages 
-                if isinstance(m, dict) and m.get("role") == "tool"
-            ]
-            if tool_outputs:
-                reply_text = "\n\n".join(tool_outputs)
-            else:
-                reply_text = "Action completed."
-
-    except Exception as e:
-        reply_text = f"ARGUS backend runtime exception: {type(e).__name__} - {str(e)}"
-
-    # Save only non-empty assistant messages to avoid database corruption
-    if reply_text and reply_text.strip():
-        save_message(session_id, "assistant", reply_text.strip())
-
-    return ChatResponse(
-        reply=reply_text, 
-        session_id=session_id,
-        action=contact_action or "reply",
-        recipient=contact_recipient,
-        body=contact_body
-    )
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
