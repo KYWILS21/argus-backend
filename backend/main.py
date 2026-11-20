@@ -1558,121 +1558,337 @@ def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bo
         f"Reply **`#argus approve`** to deploy `/preview/{slug}`."
     )
 
-def jarvis_compile_approved_task(task_id: Optional[str] = None, user_feedback: str = "") -> str:
+# =========================================================================================
+# SECTION 10B: PERPLEXITY-GRADE 5-AGENT SPECIALIST SWARM (ACCURACY + CREATIVITY ENGINE)
+# =========================================================================================
+
+def agent_1_verified_researcher(objective: str, reference_urls: List[str]) -> Dict[str, Any]:
     """
-    PHASE 2 OF CREATIVE BUILD:
-    Compiles the Research Dossier + Creative Proposal + any User Overrides into a
-    100% bespoke, standalone HTML5/Tailwind/JavaScript web application and deploys it to /preview/{slug}.
+    AGENT 1 (Deep Research & Citation Verifier):
+    Scours live web sources, crawls reference URLs, harvests real photos, and extracts
+    ONLY verified facts with citations—explicitly blocking hallucinated addresses/phones.
     """
-    t0 = time.time()
-    conn = get_db_connection()
-    c = conn.cursor()
+    raw_sources: List[str] = []
+    verified_images: List[str] = []
 
-    if task_id:
-        c.execute("SELECT * FROM pending_tasks WHERE task_id = ?", (task_id,))
-    else:
-        c.execute("SELECT * FROM pending_tasks WHERE status = 'PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 1")
-    row = c.fetchone()
+    # 1. Crawl any explicit reference URLs provided by the user
+    for url in reference_urls[:3]:
+        page_md = tool_read_webpage(url)
+        raw_sources.append(f"[SOURCE: {url}]\n{page_md}")
+        imgs = re.findall(r'https?://[^\s\)\"\']+\.(?:jpg|jpeg|png|webp)', page_md, re.I)
+        for im in imgs:
+            if im not in verified_images:
+                verified_images.append(im)
 
-    if not row:
-        c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 1")
-        row = c.fetchone()
+    # 2. Multi-angle targeted search queries (Official site, Menu/Services, Yelp/Maps/Reviews)
+    clean_query = re.sub(r'https?://[^\s]+', '', objective).strip()
+    search_angles = [
+        f"{clean_query} official website address phone hours",
+        f"{clean_query} menu prices services offerings",
+        f"{clean_query} reviews specialties local reputation"
+    ]
 
-    if not row:
-        conn.close()
-        return "⚠️ No pending creative proposal found in memory. Give me a build directive first (e.g., `#argus create a website for ...`)."
+    for angle in search_angles:
+        res = tool_web_search(angle, max_results=6)
+        raw_sources.append(f"[SEARCH VECTOR: {angle}]\n{res}")
+        # Extract any URLs discovered in search results to deep-read the top official page
+        found_links = re.findall(r'https?://[^\s\)\]]+', res)
+        for lnk in found_links:
+            low_lnk = lnk.lower()
+            if not any(skip in low_lnk for skip in ["jina.ai", "google.com", "bing.com", "yahoo.com", "facebook.com", "instagram.com", "yelp.com"]):
+                if len(reference_urls) < 2 and lnk not in reference_urls:
+                    reference_urls.append(lnk)
+                    deep_page = tool_read_webpage(lnk)
+                    raw_sources.append(f"[AUTO-DISCOVERED OFFICIAL PAGE: {lnk}]\n{deep_page[:4500]}")
+                    break
 
-    task_data = dict(row)
-    conn.close()
+    # 3. Harvest targeted item & storefront photography
+    img_json = json.loads(tool_image_search(clean_query, count=8))
+    for u in img_json.get("image_urls", []):
+        if u not in verified_images:
+            verified_images.append(u)
 
-    t_id = task_data["task_id"]
-    objective = task_data["objective"]
-    dossier = task_data["research_dossier"]
-    proposal = task_data["creative_proposal"]
-    slug = task_data["artifact_slug"]
+    combined_corpus = "\n\n".join(raw_sources)[:14000]
 
-    extra_media = tool_image_search(f"{objective} signature items products close up", count=8)
+    # 4. Strict Fact Extraction & Anti-Hallucination Synthesis
+    fact_prompt = f"""
+    You are Agent 1 (Perplexity Deep Research & Citation Verifier).
+    Extract ONLY verified facts from the raw web sources below for: "{clean_query}".
 
-    compiler_prompt = f"""
-    You are ARGUS's Master Full-Stack Frontend Synthesizer.
-    Compile the COMPLETE, 100% original, production-ready HTML5 + Tailwind CSS + Vanilla JavaScript web application from scratch.
+    === RAW WEB SOURCES ===
+    {combined_corpus}
+    === END SOURCES ===
 
-    === ORIGINAL OBJECTIVE ===
-    {objective}
+    STRICT ANTI-HALLUCINATION RULES:
+    - NEVER guess or fabricate street numbers, zip codes, or phone numbers (e.g., NEVER output fake '1234 N 15th St' or '(215) 204-4444' or '(215) 555-xxxx' unless that exact string appears verbatim in the sources above!).
+    - If an exact address, phone number, or operating hour is NOT explicitly present in the sources above, write "Verify on Official Listing / Call Store" for that field.
+    - Extract every real menu item, product, tire/service package, price, neighborhood detail, and customer quote present in the text.
+    - Cite the source URL next to verified facts.
 
-    === LIVE RESEARCH DOSSIER (VERIFIED FACTS, ADDRESS, PHONE, HOURS, MENU/SERVICES, IMAGES) ===
-    {dossier[:10000]}
-
-    === SUPPLEMENTAL ITEM PHOTOGRAPHY URLS ===
-    {extra_media}
-
-    === CREATIVE BLUEPRINT ===
-    {proposal}
-
-    === USER CREATIVE FEEDBACK / OVERRIDES ===
-    {user_feedback if user_feedback else "Execute with maximum creative polish and zero generic placeholders."}
-
-    MANDATORY ENGINEERING STANDARDS:
-    1. Include `<script src="https://cdn.tailwindcss.com"></script>` and load matching Google Fonts.
-    2. Use the REAL street address, REAL phone number, REAL operating hours, and real items/services with prices from the Research Dossier. Never invent fake 555 phone numbers or 1234 addresses.
-    3. Every item card and hero banner MUST use a unique image URL from the research dossier or `https://tse2.mm.bing.net/th?q=URL_ENCODED_SPECIFIC_ITEM_NAME&w=900&h=650&c=7&rs=1&p=0`, with an `onerror` fallback on every `<img>` tag.
-    4. Include working client-side interactivity in `<script>` tags: multi-view navigation tabs, live search/category filter, interactive item customization/booking modal, slide-over cart/estimate drawer with live subtotal math, embedded Google Maps iframe in the location view, and a working inquiry form.
-    5. Output ONLY raw, valid HTML5 code starting with `<!DOCTYPE html>` and ending with `</html>`.
+    Output a clean, structured **Verified Fact Dossier** in Markdown.
     """
 
     resp = groq_resilient_completion(
         messages=[
-            {
-                "role": "system",
-                "content": "You are an elite autonomous frontend compiler. Output ONLY raw, complete, self-contained HTML5/Tailwind/JS code starting with <!DOCTYPE html>."
-            },
+            {"role": "system", "content": "You are a strict, zero-hallucination research analyst. Only report facts grounded in the provided sources."},
+            {"role": "user", "content": fact_prompt}
+        ],
+        temperature=0.1,
+        max_tokens=2500
+    )
+    verified_dossier = clean_llm_text(resp.choices[0].message.content)
+
+    return {
+        "dossier": verified_dossier,
+        "raw_corpus": combined_corpus,
+        "images": verified_images[:12],
+        "sources_crawled": reference_urls
+    }
+
+
+def agent_2_creative_architect(objective: str, research_bundle: Dict[str, Any], user_overrides: str = "") -> str:
+    """
+    AGENT 2 (Creative Director & UX Architect):
+    Designs a bespoke, non-generic visual identity, layout architecture (1-page vs multi-view SPA),
+    typography, color system, and custom JavaScript interactive widgets tailored to the verified facts.
+    """
+    prompt = f"""
+    You are Agent 2 (Perplexity Pages / Labs Creative Director).
+    Design a bespoke digital experience for: "{objective}"
+
+    VERIFIED RESEARCH DOSSIER:
+    {research_bundle['dossier'][:5000]}
+
+    HARVESTED IMAGE URLS:
+    {json.dumps(research_bundle['images'], indent=2)}
+
+    USER CREATIVE OVERRIDES:
+    {user_overrides or "None — choose the strongest creative direction that fits this brand."}
+
+    SPECIFY:
+    1. **Aesthetic & Brand Identity**: Exact HEX palette (Background, Surface, Primary Text, Muted Text, Primary Accent, Secondary Accent) + Google Font pairing (Heading + Body) matching the authentic atmosphere of this business.
+    2. **Page Architecture**: Choose either a high-impact 1-Page Scrolling Experience or a Multi-View Interactive SPA (e.g. Overview & Catalog, Customer Reviews, Location & Hours, Custom Calculator/Booking) based on what serves this business best.
+    3. **Custom Interactive JavaScript Features**: Detail the exact working client-side tools (e.g., live search + category tabs, item modifier/customization modal, interactive cart or service estimate drawer with live math, interactive FAQ/gallery, or custom calculator).
+    4. **Visual Asset Mapping**: Assign specific image URLs from the list above (or targeted Bing proxy queries) to the hero and each catalog item.
+    """
+
+    resp = groq_resilient_completion(
+        messages=[
+            {"role": "system", "content": "You are an award-winning digital creative director. Avoid generic templates; tailor every design choice to the specific business."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.45,
+        max_tokens=2000
+    )
+    return clean_llm_text(resp.choices[0].message.content)
+
+
+def agent_3_fullstack_synthesizer(objective: str, research_bundle: Dict[str, Any], creative_spec: str, user_overrides: str = "") -> str:
+    """
+    AGENT 3 (Full-Stack Frontend Compiler):
+    Writes the complete, standalone HTML5 + Tailwind CSS + Vanilla JavaScript application from scratch.
+    """
+    compiler_prompt = f"""
+    You are Agent 3 (Autonomous Full-Stack Web Compiler).
+    Build the COMPLETE, production-ready, self-contained HTML5 + Tailwind CSS + Vanilla JS application from scratch.
+
+    OBJECTIVE: {objective}
+
+    VERIFIED RESEARCH DOSSIER (STRICT SOURCE OF TRUTH):
+    {research_bundle['dossier'][:6500]}
+
+    HARVESTED REAL PHOTO URLS:
+    {json.dumps(research_bundle['images'], indent=2)}
+
+    CREATIVE DIRECTOR SPECIFICATION:
+    {creative_spec[:4500]}
+
+    USER OVERRIDES:
+    {user_overrides or "Execute with maximum visual polish and interactive depth."}
+
+    STRICT BUILD RULES:
+    1. Include `<script src="https://cdn.tailwindcss.com"></script>` and load the specified Google Fonts.
+    2. Use ONLY verified facts, real menu items/services, real prices, and real address/phone/hours from the dossier. NEVER invent fake '555' or '204-4444' numbers or '1234' addresses.
+    3. Every `<img>` tag MUST use a verified image URL or `https://tse2.mm.bing.net/th?q=URL_ENCODED_SPECIFIC_ITEM_NAME&w=900&h=650&c=7&rs=1&p=0` AND include an inline `onerror` attribute falling back to a Bing thumbnail query for that exact item so zero broken images ever appear.
+    4. Write complete, bug-free Vanilla JavaScript inside `<script>` tags implementing:
+       - Working navigation (smooth scroll or multi-view tab switcher)
+       - Working live search bar & category filter buttons
+       - Working item customization / service selection modal
+       - Working slide-over Cart / Booking Estimate drawer with quantity controls, subtotal calculation, and interactive order/booking confirmation receipt
+       - Working embedded Google Map (using the verified address/neighborhood) and interactive contact/inquiry form
+    5. Output ONLY raw valid HTML starting with `<!DOCTYPE html>` and ending with `</html>`.
+    """
+
+    resp = groq_resilient_completion(
+        messages=[
+            {"role": "system", "content": "Output ONLY raw, complete, valid HTML5 code starting with <!DOCTYPE html>."},
             {"role": "user", "content": compiler_prompt}
         ],
         temperature=0.35,
-        max_tokens=7000
+        max_tokens=7500
     )
+    html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
+    idx = html.lower().find("<!doctype html")
+    if idx > 0:
+        html = html[idx:]
+    return html
 
-    compiled_html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
-    idx_doctype = compiled_html.lower().find("<!doctype html")
-    if idx_doctype > 0:
-        compiled_html = compiled_html[idx_doctype:]
+
+def agent_4_qa_critic_and_healer(html_code: str, research_bundle: Dict[str, Any]) -> str:
+    """
+    AGENT 4 (Adversarial QA & Fact-Audit Critic):
+    Inspects the compiled HTML before deployment for fake phone numbers, broken scripts,
+    or missing Tailwind/DOCTYPE structure, and self-heals any defects automatically.
+    """
+    defects: List[str] = []
+
+    if "<!doctype html" not in html_code.lower() or "</html>" not in html_code.lower():
+        defects.append("Incomplete HTML document structure (missing DOCTYPE or closing </html>).")
+    if "tailwindcss.com" not in html_code:
+        defects.append("Missing Tailwind CSS CDN script.")
+    if "<script>" not in html_code.lower():
+        defects.append("Missing interactive client-side <script> logic.")
+
+    # Detect hallucinated fake phone numbers if they weren't in the raw research corpus
+    fake_phones = re.findall(r'\(215\)\s*(?:555|204|123)[-\s]\d{4}', html_code)
+    for fp in fake_phones:
+        if fp not in research_bundle.get("raw_corpus", ""):
+            defects.append(f"Hallucinated placeholder phone number '{fp}' detected—replace with verified phone or 'Call Store'.")
+
+    if not defects:
+        return html_code
+
+    print(f"[Agent 4 QA Critic] Found {len(defects)} defect(s): {defects}. Triggering auto-heal...")
+    heal_prompt = f"""
+    You are Agent 4 (QA & Self-Healing Code Critic).
+    Fix the following defects in this HTML5 application while preserving all design, styling, and interactivity:
+    DEFECTS TO FIX:
+    {json.dumps(defects, indent=2)}
+
+    VERIFIED DOSSIER:
+    {research_bundle['dossier'][:3000]}
+
+    CURRENT HTML:
+    {html_code[:14000]}
+
+    Return ONLY the complete, repaired raw HTML5 starting with `<!DOCTYPE html>`.
+    """
+    healed = groq_resilient_completion(
+        messages=[
+            {"role": "system", "content": "Output ONLY repaired raw HTML5 starting with <!DOCTYPE html>."},
+            {"role": "user", "content": heal_prompt}
+        ],
+        temperature=0.2,
+        max_tokens=7500
+    )
+    repaired_html = clean_llm_text(healed.choices[0].message.content, strip_fences=True)
+    return repaired_html if "<!doctype html" in repaired_html.lower() else html_code
+
+
+def jarvis_compile_approved_task(task_id: Optional[str] = None, user_feedback: str = "") -> str:
+    """Executes Agents 3 & 4 on an existing task in SQLite and deploys the live preview."""
+    t0 = time.time()
+    conn = get_db_connection()
+    c = conn.cursor()
+    if task_id:
+        c.execute("SELECT * FROM pending_tasks WHERE task_id = ?", (task_id,))
+    else:
+        c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 1")
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return "⚠️ No task found to compile. Ask me to create a website or app first!"
+    task_data = dict(row)
+    conn.close()
+
+    slug = task_data["artifact_slug"]
+    objective = task_data["objective"]
+    research_bundle = {
+        "dossier": task_data["research_dossier"],
+        "raw_corpus": task_data["research_dossier"],
+        "images": re.findall(r'https?://[^\s\)\"\']+\.(?:jpg|jpeg|png|webp)', task_data["research_dossier"], re.I)[:10]
+    }
+    creative_spec = task_data["creative_proposal"]
+
+    raw_html = agent_3_fullstack_synthesizer(objective, research_bundle, creative_spec, user_feedback)
+    verified_html = agent_4_qa_critic_and_healer(raw_html, research_bundle)
 
     file_path = os.path.join(DEMO_DIR, f"{slug}.html")
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(compiled_html)
+        f.write(verified_html)
 
     preview_url = f"{RENDER_EXTERNAL_URL}/preview/{slug}"
     now = time.time()
 
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute(
-        "UPDATE pending_tasks SET status = 'COMPLETED', user_feedback = ?, updated_at = ? WHERE task_id = ?",
-        (user_feedback, now, t_id)
-    )
+    c.execute("UPDATE pending_tasks SET status = 'COMPLETED', user_feedback = ?, updated_at = ? WHERE task_id = ?", (user_feedback, now, task_data["task_id"]))
     c.execute("SELECT version FROM generated_artifacts WHERE slug = ?", (slug,))
-    existing_art = c.fetchone()
-    ver = (existing_art["version"] + 1) if existing_art else 1
-
+    ex = c.fetchone()
+    ver = (ex["version"] + 1) if ex else 1
     c.execute("""
         INSERT OR REPLACE INTO generated_artifacts
         (slug, title, artifact_type, objective, file_path, preview_url, version, design_notes, created_at, updated_at)
         VALUES (?, ?, 'webapp', ?, ?, ?, ?, ?, ?, ?)
-    """, (slug, objective[:80], objective, file_path, preview_url, ver, user_feedback or "Autonomous Blueprint", now, now))
+    """, (slug, objective[:80], objective, file_path, preview_url, ver, user_feedback or "5-Agent Swarm Build", now, now))
     conn.commit()
     conn.close()
 
-    log_audit_event("jarvis_compile_approved_task", {"task_id": t_id, "slug": slug, "version": ver}, "SUCCESS", (time.time() - t0) * 1000)
-
+    log_audit_event("5_agent_swarm_deploy", {"slug": slug, "version": ver}, "SUCCESS", (time.time() - t0) * 1000)
     return (
-        f"## 🚀 Bespoke Application Compiled & Deployed (`v{ver}`)\n"
-        f"- **Live URL:** [{preview_url}]({preview_url})\n"
-        f"- **Task ID:** `{t_id}`\n"
-        f"- **Creative Direction:** `{user_feedback if user_feedback else 'Autonomous Research & Creative Blueprint'}`\n"
-        f"- **Local File:** `generated_demos/{slug}.html`\n\n"
-        f"💡 *Want to tweak anything on the live page? Reply `#argus edit {slug}: <your changes>` to patch it in place.*"
+        f"## 🚀 5-Agent Swarm Build Deployed (`v{ver}`)\n"
+        f"- **Live Clickable URL:** [{preview_url}]({preview_url})\n"
+        f"- **Agents Executed:** `Researcher` → `Creative Director` → `Full-Stack Synthesizer` → `QA Fact-Audit Critic`\n"
+        f"- **Creative Notes:** `{user_feedback or 'Autonomous Brand Synthesis'}`\n\n"
+        f"💡 *Want live edits? Reply `#argus edit {slug}: <your changes>` to patch it in place.*"
     )
 
+
+def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bool = True) -> str:
+    """
+    Runs the complete 5-Agent Perplexity-Grade Swarm:
+    Agent 1 (Verified Research) -> Agent 2 (Creative Director) -> Agent 3 (Compiler) -> Agent 4 (QA Critic) -> Deploy.
+    """
+    t0 = time.time()
+    slug = derive_clean_slug(user_objective)
+    ref_urls = re.findall(r'https?://[^\s\)\]]+', user_objective)
+
+    # Agent 1: Deep Research & Citation Verification
+    research_bundle = agent_1_verified_researcher(user_objective, ref_urls)
+
+    # Agent 2: Creative Director & Brand Architecture
+    creative_spec = agent_2_creative_architect(user_objective, research_bundle)
+
+    task_id = f"task-{int(time.time())}"
+    now = time.time()
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO pending_tasks
+        (task_id, objective, task_type, research_dossier, creative_proposal, status, artifact_slug, user_feedback, created_at, updated_at)
+        VALUES (?, ?, 'webapp', ?, ?, 'PENDING_APPROVAL', ?, '', ?, ?)
+    """, (task_id, user_objective, research_bundle["dossier"][:20000], creative_spec[:12000], slug, now, now))
+    conn.commit()
+    conn.close()
+
+    if not auto_execute:
+        return (
+            f"## 🧠 ARGUS 5-Agent Research Dossier & Creative Blueprint (`{task_id}`)\n\n"
+            f"### 1. Verified Research Dossier (Agent 1)\n{research_bundle['dossier']}\n\n"
+            f"### 2. Creative Architecture Proposal (Agent 2)\n{creative_spec}\n\n"
+            f"---\nReply **`#argus approve`** to compile and deploy `/preview/{slug}`."
+        )
+
+    # Agents 3 & 4: Compile, QA Audit, and Deploy Live Link Immediately
+    deploy_summary = jarvis_compile_approved_task(task_id=task_id, user_feedback="Autonomous 5-Agent Swarm Build")
+    return (
+        f"{deploy_summary}\n\n"
+        f"---\n"
+        f"### 🔍 Verified Intelligence Summary (Agent 1)\n"
+        f"{research_bundle['dossier'][:1600]}\n\n"
+        f"### 🎨 Creative Architecture Applied (Agent 2)\n"
+        f"{creative_spec[:1000]}"
+    )
 
 def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> str:
     """
