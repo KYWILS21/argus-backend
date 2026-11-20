@@ -1431,121 +1431,6 @@ def derive_clean_slug(objective: str) -> str:
     slug = re.sub(r'[^a-z0-9]+', '', candidate.lower())[:32]
     return slug if slug else f"app-{int(time.time())}"
 
-def jarvis_compile_approved_task(task_id: Optional[str] = None, user_feedback: str = "") -> str:
-    """
-    PHASE 2 OF CREATIVE BUILD:
-    Compiles the Research Dossier + Creative Proposal + any User Overrides into a
-    100% bespoke, standalone HTML5/Tailwind/JavaScript web application and deploys it to /preview/{slug}.
-    """
-    t0 = time.time()
-    conn = get_db_connection()
-    c = conn.cursor()
-
-    if task_id:
-        c.execute("SELECT * FROM pending_tasks WHERE task_id = ?", (task_id,))
-    else:
-        c.execute("SELECT * FROM pending_tasks WHERE status = 'PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 1")
-    row = c.fetchone()
-
-    if not row:
-        c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 1")
-        row = c.fetchone()
-
-    if not row:
-        conn.close()
-        return "⚠️ No pending creative proposal found in memory. Give me a build directive first (e.g., `#argus create a website for ...`)."
-
-    task_data = dict(row)
-    conn.close()
-
-    t_id = task_data["task_id"]
-    objective = task_data["objective"]
-    dossier = task_data["research_dossier"]
-    proposal = task_data["creative_proposal"]
-    slug = task_data["artifact_slug"]
-
-    extra_media = tool_image_search(f"{objective} signature items products close up", count=8)
-
-    compiler_prompt = f"""
-    You are ARGUS's Master Full-Stack Frontend Synthesizer.
-    Compile the COMPLETE, 100% original, production-ready HTML5 + Tailwind CSS + Vanilla JavaScript web application from scratch.
-
-    === ORIGINAL OBJECTIVE ===
-    {objective}
-
-    === LIVE RESEARCH DOSSIER (VERIFIED FACTS, ADDRESS, PHONE, HOURS, MENU/SERVICES, IMAGES) ===
-    {dossier[:10000]}
-
-    === SUPPLEMENTAL ITEM PHOTOGRAPHY URLS ===
-    {extra_media}
-
-    === CREATIVE BLUEPRINT ===
-    {proposal}
-
-    === USER CREATIVE FEEDBACK / OVERRIDES ===
-    {user_feedback if user_feedback else "Execute with maximum creative polish and zero generic placeholders."}
-
-    MANDATORY ENGINEERING STANDARDS:
-    1. Include `<script src="https://cdn.tailwindcss.com"></script>` and load matching Google Fonts.
-    2. Use the REAL street address, REAL phone number, REAL operating hours, and real items/services with prices from the Research Dossier. Never invent fake 555 phone numbers or 1234 addresses.
-    3. Every item card and hero banner MUST use a unique image URL from the research dossier or `https://tse2.mm.bing.net/th?q=URL_ENCODED_SPECIFIC_ITEM_NAME&w=900&h=650&c=7&rs=1&p=0`, with an `onerror` fallback on every `<img>` tag.
-    4. Include working client-side interactivity in `<script>` tags: multi-view navigation tabs, live search/category filter, interactive item customization/booking modal, slide-over cart/estimate drawer with live subtotal math, embedded Google Maps iframe in the location view, and a working inquiry form.
-    5. Output ONLY raw, valid HTML5 code starting with `<!DOCTYPE html>` and ending with `</html>`.
-    """
-
-    resp = groq_resilient_completion(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are an elite autonomous frontend compiler. Output ONLY raw, complete, self-contained HTML5/Tailwind/JS code starting with <!DOCTYPE html>."
-            },
-            {"role": "user", "content": compiler_prompt}
-        ],
-        temperature=0.35,
-        max_tokens=7000
-    )
-
-    compiled_html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
-    idx_doctype = compiled_html.lower().find("<!doctype html")
-    if idx_doctype > 0:
-        compiled_html = compiled_html[idx_doctype:]
-
-    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(compiled_html)
-
-    preview_url = f"{RENDER_EXTERNAL_URL}/preview/{slug}"
-    now = time.time()
-
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(
-        "UPDATE pending_tasks SET status = 'COMPLETED', user_feedback = ?, updated_at = ? WHERE task_id = ?",
-        (user_feedback, now, t_id)
-    )
-    c.execute("SELECT version FROM generated_artifacts WHERE slug = ?", (slug,))
-    existing_art = c.fetchone()
-    ver = (existing_art["version"] + 1) if existing_art else 1
-
-    c.execute("""
-        INSERT OR REPLACE INTO generated_artifacts
-        (slug, title, artifact_type, objective, file_path, preview_url, version, design_notes, created_at, updated_at)
-        VALUES (?, ?, 'webapp', ?, ?, ?, ?, ?, ?, ?)
-    """, (slug, objective[:80], objective, file_path, preview_url, ver, user_feedback or "Autonomous Blueprint", now, now))
-    conn.commit()
-    conn.close()
-
-    log_audit_event("jarvis_compile_approved_task", {"task_id": t_id, "slug": slug, "version": ver}, "SUCCESS", (time.time() - t0) * 1000)
-
-    return (
-        f"## 🚀 Bespoke Application Compiled & Deployed (`v{ver}`)\n"
-        f"- **Live URL:** [{preview_url}]({preview_url})\n"
-        f"- **Task ID:** `{t_id}`\n"
-        f"- **Creative Direction:** `{user_feedback if user_feedback else 'Autonomous Research & Creative Blueprint'}`\n"
-        f"- **Local File:** `generated_demos/{slug}.html`\n\n"
-        f"💡 *Want to tweak anything on the live page? Reply `#argus edit {slug}: <your changes>` to patch it in place.*"
-    )
-
 def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bool = True) -> str:
     """
     PHASE 1 + AUTO-COMPILE:
@@ -1671,6 +1556,121 @@ def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bo
         f"## 🧠 ARGUS Research Dossier & Proposal (`{task_id}`)\n\n"
         f"{proposal_markdown}\n\n"
         f"Reply **`#argus approve`** to deploy `/preview/{slug}`."
+    )
+
+def jarvis_compile_approved_task(task_id: Optional[str] = None, user_feedback: str = "") -> str:
+    """
+    PHASE 2 OF CREATIVE BUILD:
+    Compiles the Research Dossier + Creative Proposal + any User Overrides into a
+    100% bespoke, standalone HTML5/Tailwind/JavaScript web application and deploys it to /preview/{slug}.
+    """
+    t0 = time.time()
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if task_id:
+        c.execute("SELECT * FROM pending_tasks WHERE task_id = ?", (task_id,))
+    else:
+        c.execute("SELECT * FROM pending_tasks WHERE status = 'PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 1")
+    row = c.fetchone()
+
+    if not row:
+        c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 1")
+        row = c.fetchone()
+
+    if not row:
+        conn.close()
+        return "⚠️ No pending creative proposal found in memory. Give me a build directive first (e.g., `#argus create a website for ...`)."
+
+    task_data = dict(row)
+    conn.close()
+
+    t_id = task_data["task_id"]
+    objective = task_data["objective"]
+    dossier = task_data["research_dossier"]
+    proposal = task_data["creative_proposal"]
+    slug = task_data["artifact_slug"]
+
+    extra_media = tool_image_search(f"{objective} signature items products close up", count=8)
+
+    compiler_prompt = f"""
+    You are ARGUS's Master Full-Stack Frontend Synthesizer.
+    Compile the COMPLETE, 100% original, production-ready HTML5 + Tailwind CSS + Vanilla JavaScript web application from scratch.
+
+    === ORIGINAL OBJECTIVE ===
+    {objective}
+
+    === LIVE RESEARCH DOSSIER (VERIFIED FACTS, ADDRESS, PHONE, HOURS, MENU/SERVICES, IMAGES) ===
+    {dossier[:10000]}
+
+    === SUPPLEMENTAL ITEM PHOTOGRAPHY URLS ===
+    {extra_media}
+
+    === CREATIVE BLUEPRINT ===
+    {proposal}
+
+    === USER CREATIVE FEEDBACK / OVERRIDES ===
+    {user_feedback if user_feedback else "Execute with maximum creative polish and zero generic placeholders."}
+
+    MANDATORY ENGINEERING STANDARDS:
+    1. Include `<script src="https://cdn.tailwindcss.com"></script>` and load matching Google Fonts.
+    2. Use the REAL street address, REAL phone number, REAL operating hours, and real items/services with prices from the Research Dossier. Never invent fake 555 phone numbers or 1234 addresses.
+    3. Every item card and hero banner MUST use a unique image URL from the research dossier or `https://tse2.mm.bing.net/th?q=URL_ENCODED_SPECIFIC_ITEM_NAME&w=900&h=650&c=7&rs=1&p=0`, with an `onerror` fallback on every `<img>` tag.
+    4. Include working client-side interactivity in `<script>` tags: multi-view navigation tabs, live search/category filter, interactive item customization/booking modal, slide-over cart/estimate drawer with live subtotal math, embedded Google Maps iframe in the location view, and a working inquiry form.
+    5. Output ONLY raw, valid HTML5 code starting with `<!DOCTYPE html>` and ending with `</html>`.
+    """
+
+    resp = groq_resilient_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an elite autonomous frontend compiler. Output ONLY raw, complete, self-contained HTML5/Tailwind/JS code starting with <!DOCTYPE html>."
+            },
+            {"role": "user", "content": compiler_prompt}
+        ],
+        temperature=0.35,
+        max_tokens=7000
+    )
+
+    compiled_html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
+    idx_doctype = compiled_html.lower().find("<!doctype html")
+    if idx_doctype > 0:
+        compiled_html = compiled_html[idx_doctype:]
+
+    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(compiled_html)
+
+    preview_url = f"{RENDER_EXTERNAL_URL}/preview/{slug}"
+    now = time.time()
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE pending_tasks SET status = 'COMPLETED', user_feedback = ?, updated_at = ? WHERE task_id = ?",
+        (user_feedback, now, t_id)
+    )
+    c.execute("SELECT version FROM generated_artifacts WHERE slug = ?", (slug,))
+    existing_art = c.fetchone()
+    ver = (existing_art["version"] + 1) if existing_art else 1
+
+    c.execute("""
+        INSERT OR REPLACE INTO generated_artifacts
+        (slug, title, artifact_type, objective, file_path, preview_url, version, design_notes, created_at, updated_at)
+        VALUES (?, ?, 'webapp', ?, ?, ?, ?, ?, ?, ?)
+    """, (slug, objective[:80], objective, file_path, preview_url, ver, user_feedback or "Autonomous Blueprint", now, now))
+    conn.commit()
+    conn.close()
+
+    log_audit_event("jarvis_compile_approved_task", {"task_id": t_id, "slug": slug, "version": ver}, "SUCCESS", (time.time() - t0) * 1000)
+
+    return (
+        f"## 🚀 Bespoke Application Compiled & Deployed (`v{ver}`)\n"
+        f"- **Live URL:** [{preview_url}]({preview_url})\n"
+        f"- **Task ID:** `{t_id}`\n"
+        f"- **Creative Direction:** `{user_feedback if user_feedback else 'Autonomous Research & Creative Blueprint'}`\n"
+        f"- **Local File:** `generated_demos/{slug}.html`\n\n"
+        f"💡 *Want to tweak anything on the live page? Reply `#argus edit {slug}: <your changes>` to patch it in place.*"
     )
 
 
