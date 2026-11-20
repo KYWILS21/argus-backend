@@ -1432,60 +1432,58 @@ def derive_clean_slug(objective: str) -> str:
     return slug if slug else f"app-{int(time.time())}"
 
 
-def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bool = False) -> str:
+def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bool = True) -> str:
     """
-    PHASE 1 OF CREATIVE BUILD:
-    1. Executes multi-hop live web searches, official site scraping, and targeted image harvesting.
-    2. Stores discovered facts in the SQLite Knowledge Graph.
-    3. Synthesizes a tailored Creative Direction & Architecture Proposal.
-    4. Either pauses for user approval (default HITL gate) or immediately compiles if `auto_execute=True`.
+    PHASE 1 + AUTO-COMPILE:
+    1. Detects if the user provided a reference URL in the prompt and scrapes its real text & images directly.
+    2. Executes multi-hop live web searches + targeted item image harvesting.
+    3. Synthesizes a bespoke Creative Blueprint grounded strictly in real facts (zero fake 1234 Main St / 555 numbers).
+    4. Immediately compiles and deploys the live interactive HTML app to /preview/{slug} and returns the clickable URL.
     """
     t0 = time.time()
     slug = derive_clean_slug(user_objective)
     research_log: List[str] = []
 
-    # Step 1: Always run baseline multi-vector web & image discovery so even non-tool models have rich data
-    baseline_web = tool_web_search(f"{user_objective} official site menu services prices address phone hours", max_results=8)
-    baseline_imgs = tool_image_search(user_objective, count=6)
-    research_log.append(f"=== BASELINE WEB INTEL ===\n{baseline_web}")
-    research_log.append(f"=== BASELINE VISUAL ASSETS ===\n{baseline_imgs}")
+    # 1. Extract and directly crawl any reference URL(s) provided by the user
+    provided_urls = re.findall(r'https?://[^\s\)\]]+', user_objective)
+    for ref_url in provided_urls[:2]:
+        print(f"[ARGUS Reference Crawler] Reading user-provided reference site: {ref_url}")
+        ref_content = tool_read_webpage(ref_url)
+        research_log.append(f"=== USER-PROVIDED REFERENCE WEBSITE ({ref_url}) ===\n{ref_content}")
 
-    # Step 2: Run Autonomous Multi-Hop Tool Loop via Groq to deepen research (scrape specific URLs, specific dishes/services)
+    # 2. Multi-vector live web & image discovery
+    clean_topic = re.sub(r'https?://[^\s]+', '', user_objective).strip()
+    baseline_web = tool_web_search(f"{clean_topic} official address phone hours menu services prices", max_results=8)
+    baseline_imgs = tool_image_search(clean_topic, count=6)
+    research_log.append(f"=== LIVE WEB SEARCH ===\n{baseline_web}")
+    research_log.append(f"=== HARVESTED IMAGES ===\n{baseline_imgs}")
+
+    # 3. Autonomous Multi-Hop Tool Loop to deepen facts and scrape official links found in search
     research_messages: List[Dict[str, Any]] = [
         {
             "role": "system",
             "content": (
                 "You are ARGUS's Deep Research & Creative Architecture Agent.\n"
-                "Your goal is to gather 100% authentic, specific intelligence for the user's build request, "
-                "and then write a comprehensive **Research Dossier & Creative Blueprint Proposal**.\n"
-                "1. Use `web_search`, `read_webpage`, `image_search`, and `upsert_knowledge_fact` to find exact menu items/services, "
-                "real prices, real street address, phone number, hours, customer reviews, and item-specific photo URLs.\n"
-                "2. Once you have enough real facts, output a well-structured Markdown proposal containing:\n"
-                "   - **Verified Entity Profile**: Official name, exact street address, phone number, hours, and brand reputation.\n"
-                "   - **Authentic Catalog (6â€“10 Real Items/Services)**: Exact names, prices, descriptions, and item photo URLs found.\n"
-                "   - **Proposed Creative Architecture**: Decide whether this should be a 1-page high-conversion experience or a multi-view SPA (and list the views), "
-                "propose a bespoke color palette (exact HEX codes), Google Fonts pairing, aesthetic vibe, and custom interactive JS features (e.g. live order bag with modifiers, tire/service estimator, appointment scheduler, interactive filter).\n"
-                "NEVER use generic placeholder data from other businesses."
+                "1. Inspect the initial search results and any user-provided reference website. Use `web_search`, `read_webpage`, and `image_search` "
+                "to gather the REAL street address, REAL phone number, REAL operating hours, REAL menu items/services with prices, and REAL photo URLs.\n"
+                "2. NEVER invent fake addresses like '1234 N 15th St' or fake phone numbers like '(215) 555-1234'. If a detail is not found, state 'See Store / Call for Details'.\n"
+                "3. Synthesize a crisp **Research Dossier & Creative Blueprint** specifying the exact real facts, 6–10 authentic items/services, "
+                "custom HEX color palette, Google Fonts pairing, and interactive JS features tailored to this business."
             )
         },
         {
             "role": "user",
-            "content": (
-                f"USER OBJECTIVE: {user_objective}\n\n"
-                f"INITIAL LIVE RESEARCH:\n{baseline_web[:4500]}\n\n"
-                f"INITIAL IMAGES:\n{baseline_imgs}\n\n"
-                "Perform any additional targeted searches or URL reads needed, then present the complete Research Dossier & Creative Blueprint Proposal."
-            )
+            "content": f"OBJECTIVE: {user_objective}\n\nINITIAL DATA:\n" + "\n\n".join(research_log)[:7500]
         }
     ]
 
     proposal_markdown = ""
-    for hop in range(4):
+    for hop in range(3):
         try:
             resp = groq_resilient_completion(
                 messages=research_messages,
-                temperature=0.3,
-                max_tokens=2800,
+                temperature=0.25,
+                max_tokens=2500,
                 tools=JARVIS_TOOL_DECLARATIONS,
                 tool_choice="auto"
             )
@@ -1502,7 +1500,7 @@ def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bo
                 except Exception:
                     fn_args = {}
                 tool_out = execute_jarvis_tool_call(fn_name, fn_args)
-                research_log.append(f"=== HOP {hop+1} TOOL [{fn_name}({fn_args})] ===\n{tool_out}")
+                research_log.append(f"=== HOP {hop+1} [{fn_name}({fn_args})] ===\n{tool_out}")
                 research_messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -1510,36 +1508,29 @@ def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bo
                     "content": tool_out[:4500]
                 })
         except Exception as e:
-            print(f"[ARGUS Research Hop {hop+1} Fallback]: {e}")
+            print(f"[ARGUS Research Hop {hop+1} Warning]: {e}")
             break
 
-    # If the loop finished tool calls without final text, synthesize the proposal now
     if not proposal_markdown:
         synth_resp = groq_resilient_completion(
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are ARGUS's Creative Director. Based on the live research dossier below, write a detailed "
-                        "**Research Dossier & Creative Blueprint Proposal** including: "
-                        "1) Verified Address, Phone, Hours & Brand Story; "
-                        "2) 6-10 Authentic Menu Items / Services with prices & image URLs; "
-                        "3) Bespoke Aesthetic Theme (exact HEX colors, Google Fonts, 1-page vs multi-page view structure, and custom interactive JS widgets)."
-                    )
+                    "content": "Synthesize a factual Research Dossier & Creative Blueprint from the scraped data. Do NOT invent fake 555 phone numbers or 1234 addresses."
                 },
                 {
                     "role": "user",
-                    "content": f"OBJECTIVE: {user_objective}\n\nFULL RESEARCH LOG:\n" + "\n\n".join(research_log)[:10000]
+                    "content": f"OBJECTIVE: {user_objective}\n\nRESEARCH DATA:\n" + "\n\n".join(research_log)[:9500]
                 }
             ],
-            temperature=0.3,
-            max_tokens=2800
+            temperature=0.25,
+            max_tokens=2500
         )
         proposal_markdown = clean_llm_text(synth_resp.choices[0].message.content)
 
-    # Save the pending checkpoint in SQLite
+    # Save checkpoint to SQLite
     task_id = f"task-{int(time.time())}"
-    full_dossier = "\n\n".join(research_log)[:20000]
+    full_dossier = "\n\n".join(research_log)[:22000]
     now = time.time()
 
     conn = get_db_connection()
@@ -1552,183 +1543,46 @@ def jarvis_autonomous_research_and_propose(user_objective: str, auto_execute: bo
     conn.commit()
     conn.close()
 
-    log_audit_event("jarvis_research_and_propose", {"task_id": task_id, "slug": slug, "auto": auto_execute}, "SUCCESS", (time.time() - t0) * 1000)
-
+    # Always compile & deploy immediately unless user explicitly asks for "proposal only"
     if auto_execute:
-        return jarvis_compile_approved_task(task_id=task_id, user_feedback="Auto-approved by user flag.")
+        compiled_report = jarvis_compile_approved_task(task_id=task_id, user_feedback="Autonomous full-stack deployment.")
+        return (
+            f"{compiled_report}\n\n"
+            f"---\n"
+            f"### 📋 Research & Creative Summary Used\n"
+            f"{proposal_markdown[:1500]}..."
+        )
 
     return (
-        f"## ðŸ§  ARGUS Deep Research Dossier & Creative Proposal (`{task_id}`)\n"
-        f"**Target Slug:** `/preview/{slug}`\n\n"
+        f"## 🧠 ARGUS Research Dossier & Proposal (`{task_id}`)\n\n"
         f"{proposal_markdown}\n\n"
-        f"---\n"
-        f"### â¸ï¸ Awaiting Your Creative Greenlight\n"
-        f"- **Approve as proposed:** Reply **`#argus approve`** (or click **Approve & Build** in the dashboard).\n"
-        f"- **Steer the creative direction:** Reply **`#argus approve: <your custom instructions>`** *(e.g. \"make it a 2-page dark industrial theme, use Oswald font, and add an interactive tire size calculator\")*."
+        f"Reply **`#argus approve`** to deploy `/preview/{slug}`."
     )
 
-
-def jarvis_compile_approved_task(task_id: Optional[str] = None, user_feedback: str = "") -> str:
-    """
-    PHASE 2 OF CREATIVE BUILD (POST-APPROVAL):
-    Takes the approved Research Dossier + Creative Proposal + any User Overrides and writes a
-    100% bespoke, zero-template HTML5/Tailwind/JavaScript single- or multi-view web application from scratch.
-    """
-    t0 = time.time()
-    conn = get_db_connection()
-    c = conn.cursor()
-
-    if task_id:
-        c.execute("SELECT * FROM pending_tasks WHERE task_id = ?", (task_id,))
-    else:
-        c.execute("SELECT * FROM pending_tasks WHERE status = 'PENDING_APPROVAL' ORDER BY created_at DESC LIMIT 1")
-    row = c.fetchone()
-
-    # If no PENDING_APPROVAL task exists, allow re-compiling the most recent task with new feedback
-    if not row:
-        c.execute("SELECT * FROM pending_tasks ORDER BY created_at DESC LIMIT 1")
-        row = c.fetchone()
-
-    if not row:
-        conn.close()
-        return "âš ï¸ No pending creative proposal found in memory. Give me a build directive first (e.g., `#argus create a website for ...`)."
-
-    task_data = dict(row)
-    conn.close()
-
-    t_id = task_data["task_id"]
-    objective = task_data["objective"]
-    dossier = task_data["research_dossier"]
-    proposal = task_data["creative_proposal"]
-    slug = task_data["artifact_slug"]
-
-    # Harvest additional targeted item photos so the compiler has rich visual URLs for every card
-    extra_media = tool_image_search(f"{objective} signature items products close up", count=8)
-
-    compiler_prompt = f"""
-    You are ARGUS's Master Full-Stack Frontend Synthesizer.
-    The user has APPROVED the Creative Proposal below. Your job is to write the COMPLETE, 100% original, production-ready HTML5 + Tailwind CSS + Vanilla JavaScript web application from scratch.
-
-    === ORIGINAL OBJECTIVE ===
-    {objective}
-
-    === LIVE RESEARCH DOSSIER (VERIFIED FACTS, ADDRESS, PHONE, HOURS, MENU/SERVICES, IMAGES) ===
-    {dossier[:10000]}
-
-    === SUPPLEMENTAL ITEM PHOTOGRAPHY URLS ===
-    {extra_media}
-
-    === APPROVED CREATIVE PROPOSAL ===
-    {proposal}
-
-    === USER CREATIVE FEEDBACK / OVERRIDES ===
-    {user_feedback if user_feedback else "Approved as proposed. Execute with maximum creative polish and zero generic placeholders."}
-
-    MANDATORY ZERO-TEMPLATE ENGINEERING STANDARDS:
-    1. BESPOKE VISUAL IDENTITY:
-       - Include `<script src="https://cdn.tailwindcss.com"></script>` and load the exact Google Fonts specified in the proposal.
-       - Apply the custom HEX color palette, border-radius aesthetic, and typography that match this exact business/project.
-    2. 100% AUTHENTIC CONTENT & PHOTOGRAPHY:
-       - Populate the hero, navigation, top status bar, and footer with the REAL street address, REAL phone number, REAL operating hours, and authentic policies discovered in the research dossier.
-       - Populate at least 6 to 9 real items/services/products with their real descriptions and prices.
-       - Every item card and hero banner MUST use a unique image URL from the research dossier or `https://tse2.mm.bing.net/th?q=URL_ENCODED_SPECIFIC_ITEM_NAME&w=900&h=650&c=7&rs=1&p=0`. Always attach an `onerror` handler to every `<img>` tag pointing to a Bing thumbnail proxy URL for that specific item so no broken image icon can ever render.
-    3. RICH CLIENT-SIDE INTERACTIVITY (PURE VANILLA JS):
-       - Multi-View Navigation: If the proposal calls for a 2-page or multi-view layout (e.g. Overview/Catalog, Reviews/Story, Hours/Location/Map, or Custom Calculator), implement smooth JavaScript tab/view switching in the sticky navbar.
-       - Live Search & Category Filtering: Include a working search input and category filter buttons that dynamically filter the item/service cards.
-       - Interactive Customization Modal & Slide-Over Drawer: Clicking any item/service opens a customization or booking modal (with real options/modifiers) and adds it to a slide-over Cart or Service Estimate/Appointment Drawer with live subtotal math and an interactive checkout/booking confirmation receipt.
-       - Embedded Map & Direct Inquiry Form: In the Location/Contact section, include an embedded Google Maps iframe (`https://www.google.com/maps?q=URL_ENCODED_ADDRESS&output=embed`) and a working inquiry form with instant toast feedback.
-    4. OUTPUT FORMAT:
-       - Output ONLY raw, valid HTML5 code starting with `<!DOCTYPE html>` and ending with `</html>`. Do NOT wrap in markdown explanations.
-    """
-
-    resp = groq_resilient_completion(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are an elite autonomous frontend compiler. Output ONLY raw, complete, self-contained HTML5/Tailwind/JS code starting with <!DOCTYPE html>."
-            },
-            {"role": "user", "content": compiler_prompt}
-        ],
-        temperature=0.35,
-        max_tokens=7000
-    )
-
-    compiled_html = clean_llm_text(resp.choices[0].message.content, strip_fences=True)
-
-    # Ensure valid HTML start
-    idx_doctype = compiled_html.lower().find("<!doctype html")
-    if idx_doctype > 0:
-        compiled_html = compiled_html[idx_doctype:]
-
-    file_path = os.path.join(DEMO_DIR, f"{slug}.html")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(compiled_html)
-
-    preview_url = f"{RENDER_EXTERNAL_URL}/preview/{slug}"
-    now = time.time()
-
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(
-        "UPDATE pending_tasks SET status = 'COMPLETED', user_feedback = ?, updated_at = ? WHERE task_id = ?",
-        (user_feedback, now, t_id)
-    )
-    c.execute("SELECT version FROM generated_artifacts WHERE slug = ?", (slug,))
-    existing_art = c.fetchone()
-    ver = (existing_art["version"] + 1) if existing_art else 1
-
-    c.execute("""
-        INSERT OR REPLACE INTO generated_artifacts
-        (slug, title, artifact_type, objective, file_path, preview_url, version, design_notes, created_at, updated_at)
-        VALUES (?, ?, 'webapp', ?, ?, ?, ?, ?, ?, ?)
-    """, (slug, objective[:80], objective, file_path, preview_url, ver, user_feedback or "Approved Blueprint", now, now))
-    conn.commit()
-    conn.close()
-
-    log_audit_event("jarvis_compile_approved_task", {"task_id": t_id, "slug": slug, "version": ver}, "SUCCESS", (time.time() - t0) * 1000)
-
-    return (
-        f"## ðŸš€ Bespoke Application Compiled & Deployed (`v{ver}`)\n"
-        f"- **Live URL:** [{preview_url}]({preview_url})\n"
-        f"- **Task ID:** `{t_id}`\n"
-        f"- **Creative Direction Applied:** `{user_feedback if user_feedback else 'Approved Research & Creative Blueprint'}`\n"
-        f"- **Local File:** `generated_demos/{slug}.html`\n\n"
-        f"ðŸ’¡ *Want to modify anything on the live site? Reply `#argus edit {slug}: <your changes>` or `#argus approve: <new styling notes>` to patch it in place.*"
-    )
-
-
-# =========================================================================================
-# SECTION 11: MASTER JARVIS REACT AGENT LOOP (HANDLES ALL GENERAL & MULTI-TOOL DIRECTIVES)
-# =========================================================================================
 
 def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> str:
     """
     Master Jarvis Orchestrator:
-    1. Routes Creative Approval / Revision commands (`#argus approve...`) to Phase 2 Compiler.
-    2. Routes Live Self-Editing commands (`#argus edit <slug>: ...`) to the Live HTML Patcher.
-    3. Routes Website / App / Creative Generation directives to Phase 1 Deep Research + Approval Gate
-       (or immediate execution if `#argus auto` is included).
-    4. Routes Executive Briefing requests directly to the multi-source Briefing Synthesizer.
-    5. Handles all other requests (Calendar, Gmail, Canvas, Deep Web Research, Memory, Coding)
-       through an autonomous multi-step Groq ReAct tool-calling loop.
+    - Any website / demo / landing page request automatically researches, compiles, hosts on /preview/{slug}, and returns the clickable URL.
+    - Approval or follow-up 'set it up / give me the link' requests immediately compile the latest pending build.
+    - Edit commands (`#argus edit <slug>: ...`) patch the live HTML file in place.
     """
     clean_input = re.sub(r'^#?argus\b[:\s]*', '', user_input.strip(), flags=re.IGNORECASE).strip()
     if not clean_input:
         clean_input = "Give me a status report and executive briefing."
 
     save_conversation_turn(session_id, "user", user_input)
-
     low = clean_input.lower()
 
-    # --- ROUTE 1: CREATIVE APPROVAL GATE (`approve`, `greenlight`, `build it`, `ship it`) ---
-    if re.match(r'^(approve|greenlight|build\s+it|ship\s+it|confirm\s+build)\b', low):
+    # --- ROUTE 1: APPROVAL OR FOLLOW-UP DEPLOYMENT TRIGGER ---
+    if re.search(r'\b(approve|greenlight|build it|ship it|confirm build|set it up|deploy it|give me the link|link for the demo)\b', low):
         feedback = re.sub(r'^(approve|greenlight|build\s+it|ship\s+it|confirm\s+build)[:\-\s]*', '', clean_input, flags=re.I).strip()
         response_md = jarvis_compile_approved_task(user_feedback=feedback)
         save_conversation_turn(session_id, "assistant", response_md)
         return response_md
 
-    # --- ROUTE 2: LIVE SELF-PATCHING EDITOR (`edit <slug>: ...` or `update website <slug>...`) ---
-    edit_match = re.match(r'^(?:edit|patch|modify|revise)\s+([a-z0-9\-_]+)[:\-\s]+(.+)$', clean_input, flags=re.I | re.DOTALL)
+    # --- ROUTE 2: LIVE SELF-PATCHING EDITOR (`edit <slug>: ...`) ---
+    edit_match = re.match(r'^(?:edit|patch|modify|revise|update)\s+([a-z0-9\-_]+)[:\-\s]+(.+)$', clean_input, flags=re.I | re.DOTALL)
     if edit_match:
         target_slug = edit_match.group(1).strip()
         mod_notes = edit_match.group(2).strip()
@@ -1736,16 +1590,15 @@ def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> 
         save_conversation_turn(session_id, "assistant", response_md)
         return response_md
 
-    # --- ROUTE 3: WEBSITE / WEBAPP / DEMO RESEARCH & CREATIVE PROPOSAL ENGINE ---
+    # --- ROUTE 3: WEBSITE / DEMO CREATION (AUTO-RESEARCH + AUTO-DEPLOY CLICKABLE URL) ---
     is_web_build = any(
         phrase in low for phrase in [
-            "create a demo website", "create a website", "build a website", "make a website",
-            "generate a website", "demo site", "web app for", "landing page for", "create a site"
+            "website", "demo site", "web app", "landing page", "webpage", "create a site", "build a site", "make a site", "page for"
         ]
     )
     if is_web_build:
-        auto_flag = any(flag in low for flag in ["--auto", "auto mode", "skip approval", "build immediately"])
-        response_md = jarvis_autonomous_research_and_propose(clean_input, auto_execute=auto_flag)
+        proposal_only = any(flag in low for flag in ["proposal only", "draft only", "ask before building"])
+        response_md = jarvis_autonomous_research_and_propose(clean_input, auto_execute=(not proposal_only))
         save_conversation_turn(session_id, "assistant", response_md)
         return response_md
 
@@ -1760,19 +1613,13 @@ def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> 
     known_facts = query_knowledge_graph(limit=15)
 
     system_prompt = (
-        "You are ARGUS v4.0, a Jarvis-class Autonomous Executive AI Assistant built for Kyle Wilson "
-        "(M.S. Computer Science student at Temple University, Data Science & ML researcher, Campus Recreation Supervisor in Philadelphia).\n"
-        "You have full access to live tools:\n"
-        "- `web_search`, `read_webpage`, `image_search` for live internet & academic research\n"
-        "- `upsert_knowledge_fact` to permanently store facts in your SQLite Knowledge Graph\n"
-        "- `calendar_list_events`, `calendar_add_event`, `calendar_delete_event` for schedule management\n"
-        "- `gmail_read_inbox`, `gmail_send_or_draft` for email communications\n"
-        "- `canvas_sync_and_summary`, `canvas_add_local_item` for Temple University Canvas coursework tracking\n"
-        "- `executive_briefing` for comprehensive daily briefings\n"
-        "- `patch_existing_webapp`, `list_generated_demos` for managing deployed web applications\n\n"
-        f"CURRENT KNOWN FACTS IN MEMORY:\n{json.dumps(known_facts, indent=2)}\n\n"
-        "Always take autonomous action using your tools when information or state changes are needed, "
-        "and deliver clear, well-structured Markdown responses."
+        f"You are ARGUS v4.0, a Jarvis-class Autonomous Executive AI Assistant built for Kyle Wilson in Philadelphia.\n"
+        f"IMPORTANT CAPABILITY FACT: You HAVE a built-in live web hosting server at `{RENDER_EXTERNAL_URL}/preview/<slug>` and a dashboard at `{RENDER_EXTERNAL_URL}/`. "
+        "Never tell the user you cannot host websites—if they ask for a website or link, tell them to use `#argus create a website for <business>` or use `list_generated_demos`.\n"
+        "Available live tools: `web_search`, `read_webpage`, `image_search`, `upsert_knowledge_fact`, "
+        "`calendar_list_events`, `calendar_add_event`, `calendar_delete_event`, `gmail_read_inbox`, `gmail_send_or_draft`, "
+        "`canvas_sync_and_summary`, `canvas_add_local_item`, `executive_briefing`, `patch_existing_webapp`, `list_generated_demos`.\n\n"
+        f"CURRENT KNOWN FACTS IN MEMORY:\n{json.dumps(known_facts, indent=2)}"
     )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -1811,7 +1658,6 @@ def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> 
                 })
         except Exception as e:
             print(f"[ARGUS ReAct Step {step+1} Fallback]: {e}")
-            # Fallback to direct web-grounded completion if a model rejects tool schema
             web_ctx = tool_web_search(clean_input, max_results=5)
             fallback_resp = groq_resilient_completion(
                 messages=[
@@ -1834,7 +1680,6 @@ def run_jarvis_executive_agent(user_input: str, session_id: str = "default") -> 
 
     save_conversation_turn(session_id, "assistant", final_reply)
     return final_reply
-
 
 # =========================================================================================
 # SECTION 12: FASTAPI APPLICATION, AUTHENTICATION & REQUEST SCHEMAS
